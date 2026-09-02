@@ -1,16 +1,14 @@
 <div align="center">
   <br />
-  <svg width="240" height="64" viewBox="0 0 240 64" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="45" cy="32" r="11" fill="currentColor"/>
-    <line x1="45" y1="32" x2="195" y2="32" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
-    <circle cx="195" cy="32" r="11" fill="currentColor"/>
-  </svg>
-  <h2 style="margin: 8px 0 2px 0; letter-spacing: 0.12em;">BayOS</h2>
+  <img src="logo.svg" alt="BayOS Logo" width="220" />
+  <h2>BayOS</h2>
   <p><em>connecting people to people</em></p>
   <br />
 </div>
 
----# BayOS™
+---
+
+# BayOS™
 *A Sovereign, Human-Owned Cognitive Operating System*
 
 BayOS coordinates specialized AI agents across plain Markdown files stored in user-owned local storage. It delivers maximum cognitive leverage with minimum friction, keeping the human firmly in executive control.
