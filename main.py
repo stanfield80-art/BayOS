@@ -22,10 +22,14 @@ from starlette.responses import JSONResponse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("bayos.kernel")
 
+
 # 1. Fail-Closed Authentication Configuration
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 BAYOS_AUTH_KEY = os.environ.get("BAYOS_AUTH_KEY")
 if not BAYOS_AUTH_KEY:
-    logger.warning("BAYOS_AUTH_KEY is not set. All authenticated endpoints will fail closed.")
+    raise RuntimeError("BAYOS_AUTH_KEY is not set. Set it as an environment variable before starting the gateway.")
+
+API_KEY_NAME = "X-BayOS-Key"
 
 API_KEY_NAME = "X-BayOS-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
