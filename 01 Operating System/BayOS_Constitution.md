@@ -1,6 +1,6 @@
 
 # BayOS™ Constitution
-*Status: Canonical | Version: 2.2.0 | Default Trust Level: Stage 1*
+*Status: Canonical | Version: 2.4.0 | Default Trust Level: Stage 1*
 
 ## The 8 Constitutional Laws
 
