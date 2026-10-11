@@ -5,13 +5,16 @@ Status: Production Hardened
 """
 
 import asyncio
+import hmac
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict, deque
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Deque, Dict, List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security, status
 from fastapi.security import APIKeyHeader
 from google import genai
 from pydantic import BaseModel, Field
@@ -24,15 +27,18 @@ logger = logging.getLogger("bayos.kernel")
 
 
 # 1. Fail-Closed Authentication Configuration
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 BAYOS_AUTH_KEY = os.environ.get("BAYOS_AUTH_KEY")
 if not BAYOS_AUTH_KEY:
     raise RuntimeError("BAYOS_AUTH_KEY is not set. Set it as an environment variable before starting the gateway.")
 
 API_KEY_NAME = "X-BayOS-Key"
-
-API_KEY_NAME = "X-BayOS-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+# Local smoke tests set BAYOS_INFERENCE_MODE=stub so ingest can be exercised
+# without calling Gemini. Cloud Run must leave this unset (default: gemini).
+_startup_inference_mode = os.environ.get("BAYOS_INFERENCE_MODE", "gemini").strip().lower() or "gemini"
+if _startup_inference_mode == "stub":
+    logger.warning("BAYOS_INFERENCE_MODE=stub: Gemini is not called. Do not set this on Cloud Run.")
 
 
 async def verify_auth_key(api_key: Optional[str] = Security(api_key_header)) -> str:
@@ -42,7 +48,7 @@ async def verify_auth_key(api_key: Optional[str] = Security(api_key_header)) -> 
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication not configured on server (BAYOS_AUTH_KEY missing).",
         )
-    if not api_key or api_key != BAYOS_AUTH_KEY:
+    if not api_key or not hmac.compare_digest(api_key, BAYOS_AUTH_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key.",
@@ -102,6 +108,43 @@ async def check_rate_limit(request: Request, api_key: str = Depends(verify_auth_
         )
 
 
+# 4. In-memory inbox.
+# Cloud Run with min-instances 0 drops this deque when the instance shuts down.
+# A cheap durable replacement is Cloud Firestore (Native mode), collection "inbox":
+# write one document per ingest and list the newest documents from GET /api/v1/inbox.
+# That store is not wired up here.
+INBOX_CAPACITY = 100
+MAX_STORED_TASK_CHARS = 20_000
+MAX_STORED_OUTPUT_CHARS = 50_000
+INBOX_NOTICE = (
+    "In-memory only. This list is wiped when the Cloud Run instance scales to zero, "
+    "and separate instances do not share it. A cheap durable replacement is Cloud Firestore "
+    "(Native mode), collection inbox."
+)
+
+_inbox: Deque["InboxItem"] = deque(maxlen=INBOX_CAPACITY)
+_gemini_client: Optional[genai.Client] = None
+
+
+def clip_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    marker = "\n[truncated]"
+    return text[: max(0, limit - len(marker))] + marker
+
+
+def inference_mode() -> str:
+    return os.environ.get("BAYOS_INFERENCE_MODE", "gemini").strip().lower() or "gemini"
+
+
+def get_gemini_client() -> genai.Client:
+    """Create the Gemini client on first use. The key comes from the environment."""
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client()
+    return _gemini_client
+
+
 # --- Application Setup ---
 app = FastAPI(
     title="BayOS Gateway",
@@ -110,9 +153,6 @@ app = FastAPI(
     redoc_url=None,
 )
 app.add_middleware(BodySizeLimitMiddleware)
-
-# Initialize Gemini Client
-gemini_client = genai.Client()
 
 # 5. Full 28-Agent System Registry
 AGENT_PROMPTS: Dict[str, str] = {
@@ -166,6 +206,62 @@ class TaskIngestResponse(BaseModel):
     version: str = "2.4.0"
 
 
+class InboxItem(BaseModel):
+    id: str
+    received_at: str
+    agent: str
+    task: str
+    status: str
+    output: str
+    version: str = "2.4.0"
+
+
+class InboxListResponse(BaseModel):
+    storage: str
+    durable: bool
+    cleared_on_scale_to_zero: bool
+    notice: str
+    total: int
+    count: int
+    items: List[InboxItem]
+
+
+async def run_inference(agent_id: str, system_instruction: str, task: str) -> str:
+    """Call Gemini, or return a local acknowledgement when stub mode is on."""
+    mode = inference_mode()
+    if mode == "stub":
+        return f"[stub] accepted by {agent_id}"
+    if mode != "gemini":
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Unknown BAYOS_INFERENCE_MODE '{mode}'. "
+                "Use gemini, or stub for a local smoke test only."
+            ),
+        )
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GEMINI_API_KEY is not configured.",
+        )
+
+    client = get_gemini_client()
+    try:
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=task,
+            config={"system_instruction": system_instruction},
+        )
+        return response.text or ""
+    except Exception as exc:
+        logger.error("Inference failure for agent %s: %s", agent_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Inference failure: {exc}",
+        ) from exc
+
+
 # --- Routes ---
 @app.get("/health", tags=["Telemetry"])
 async def health_check():
@@ -176,7 +272,32 @@ async def health_check():
         "version": "2.4.0",
         "registered_agents": len(AGENT_PROMPTS),
         "auth_configured": bool(BAYOS_AUTH_KEY),
+        "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+        "inference_mode": inference_mode(),
+        "inbox_storage": "memory",
     }
+
+
+@app.get(
+    "/api/v1/inbox",
+    response_model=InboxListResponse,
+    dependencies=[Depends(verify_auth_key), Depends(check_rate_limit)],
+    tags=["Inbox"],
+)
+async def list_inbox(limit: int = Query(default=20, ge=1, le=100)):
+    """List recently ingested tasks, newest first."""
+    ordered = list(_inbox)
+    ordered.reverse()
+    selected = ordered[:limit]
+    return InboxListResponse(
+        storage="memory",
+        durable=False,
+        cleared_on_scale_to_zero=True,
+        notice=INBOX_NOTICE,
+        total=len(_inbox),
+        count=len(selected),
+        items=selected,
+    )
 
 
 @app.post(
@@ -188,6 +309,7 @@ async def health_check():
 async def ingest_task(payload: TaskIngestRequest):
     """
     Ingests, validates, and routes tasks to target BayOS agents.
+    Records the task in the in-memory inbox so it can be read back.
     4. Offloads blocking Gemini API calls to an async threadpool.
     """
     agent_id = payload.agent.lower()
@@ -199,22 +321,29 @@ async def ingest_task(payload: TaskIngestRequest):
             detail=f"Agent '{payload.agent}' not recognized. Registered count: {len(AGENT_PROMPTS)}.",
         )
 
-    # Offload blocking client.models.generate_content call
-    try:
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model="gemini-2.5-flash",
-            contents=payload.task,
-            config={"system_instruction": system_instruction},
-        )
-        output_text = response.text or ""
-    except Exception as exc:
-        logger.error("Inference failure for agent %s: %s", agent_id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Inference failure: {str(exc)}",
-        )
+    record = InboxItem(
+        id=uuid.uuid4().hex,
+        received_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        agent=agent_id,
+        task=clip_text(payload.task, MAX_STORED_TASK_CHARS),
+        status="pending",
+        output="",
+        version="2.4.0",
+    )
+    _inbox.append(record)
 
+    try:
+        output_text = await run_inference(agent_id, system_instruction, payload.task)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        record.status = "failed"
+        record.output = clip_text(detail, MAX_STORED_OUTPUT_CHARS)
+        logger.info("Ingest id=%s agent=%s status=failed", record.id, agent_id)
+        raise
+
+    record.status = "completed"
+    record.output = clip_text(output_text, MAX_STORED_OUTPUT_CHARS)
+    logger.info("Ingest id=%s agent=%s status=completed", record.id, agent_id)
     return TaskIngestResponse(
         agent=agent_id,
         status="completed",
