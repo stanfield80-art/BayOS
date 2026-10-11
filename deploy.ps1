@@ -4,12 +4,15 @@
   Deploy the BayOS gateway to Google Cloud Run.
 
   Signs in if needed, selects a project, enables APIs, stores
-  BAYOS_AUTH_KEY in Secret Manager without echoing it, grants the
-  Cloud Run service account Vertex AI User and Cloud Datastore User,
-  creates a Native Firestore database when one is missing, deploys from
+  BAYOS_AUTH_KEY in Secret Manager without echoing it, creates the
+  runtime service account bayos-gateway@PROJECT.iam.gserviceaccount.com
+  when it is missing, and grants that account only Vertex AI User,
+  Cloud Datastore User, and access to the bayos-auth-key secret.
+  Cloud Build keeps roles/run.builder on the Compute Engine account.
+  Creates a Native Firestore database when one is missing, deploys from
   this folder, then smoke-tests /health, a direct inbox post, and ingest.
-  Gemini is called with that service account. No Gemini API key is required.
-  Inbox items are stored in Firestore collection inbox.
+  Gemini is called with the runtime service account. No Gemini API key
+  is required. Inbox items are stored in Firestore collection inbox.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +25,7 @@ $Region = "us-central1"
 $ServiceName = "bayos-gateway"
 $MinInstances = "0"
 $MaxInstances = "1"
+$Concurrency = "10"
 $AuthSecretName = "bayos-auth-key"
 $VertexLocation = "global"
 $FirestoreLocation = "nam5"
@@ -276,6 +280,104 @@ function Ensure-FirestoreDatabase {
     Write-Host "Firestore database '(default)' is present in $($existing.Location)."
 }
 
+function Ensure-GatewayServiceAccount {
+    param([Parameter(Mandatory = $true)][string]$ProjectId)
+    $email = "bayos-gateway@$ProjectId.iam.gserviceaccount.com"
+    $described = Invoke-GcloudNative -Quiet -ArgumentList @(
+        "iam", "service-accounts", "describe", $email, "--format=json"
+    )
+    if ($described.ExitCode -eq 0) {
+        Write-Host "Runtime service account already exists: $email"
+        return $email
+    }
+    Write-Host "Creating runtime service account $email"
+    $created = Invoke-GcloudNative -ArgumentList @(
+        "iam", "service-accounts", "create", "bayos-gateway",
+        "--display-name", "BayOS Gateway",
+        "--project", $ProjectId,
+        "--quiet"
+    )
+    if ($created.ExitCode -ne 0) {
+        Write-Host "Create did not succeed. Checking whether the account already exists."
+        Start-Sleep -Seconds 10
+        $described = Invoke-GcloudNative -Quiet -ArgumentList @(
+            "iam", "service-accounts", "describe", $email, "--format=json"
+        )
+        if ($described.ExitCode -ne 0) {
+            throw "Could not create the runtime service account $email."
+        }
+    }
+    return $email
+}
+
+function Add-IamBinding {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [switch]$Required
+    )
+    $result = Invoke-GcloudNative -ArgumentList $ArgumentList
+    if ($result.ExitCode -eq 0) {
+        return
+    }
+    Write-Host "Grant did not succeed yet. Waiting 15 seconds and trying once more."
+    Start-Sleep -Seconds 15
+    $result = Invoke-GcloudNative -ArgumentList $ArgumentList
+    if ($result.ExitCode -eq 0) {
+        return
+    }
+    $shown = "gcloud " + ($ArgumentList -join " ")
+    if ($Required) {
+        throw "This command failed: $shown"
+    }
+    Write-Host "Continuing after this optional grant failed: $shown"
+}
+
+function Show-LegacyComputeNote {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProjectId,
+        [Parameter(Mandatory = $true)][string]$ComputeSa
+    )
+    $member = "serviceAccount:$ComputeSa"
+    Write-Host ""
+    Write-Host "Earlier deploys may have granted the Compute Engine account data-plane roles."
+    Write-Host "This script does not remove those bindings. After this deploy works, you can remove them."
+    Write-Host "Leave roles/run.builder on $ComputeSa. Cloud Build uses that account to deploy."
+    Write-Host "gcloud projects remove-iam-policy-binding $ProjectId --member=$member --role=roles/aiplatform.user"
+    Write-Host "gcloud projects remove-iam-policy-binding $ProjectId --member=$member --role=roles/datastore.user"
+    Write-Host "gcloud secrets remove-iam-policy-binding $AuthSecretName --member=$member --role=roles/secretmanager.secretAccessor"
+}
+
+function Show-BudgetHint {
+    param([Parameter(Mandatory = $true)][string]$ProjectId)
+    $accountId = ""
+    $described = Invoke-GcloudNative -Quiet -ArgumentList @(
+        "billing", "projects", "describe", $ProjectId, "--format=json"
+    )
+    if ($described.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($described.Output)) {
+        try {
+            $info = $described.Output | ConvertFrom-Json
+            $name = [string]$info.billingAccountName
+            if ($name -match 'billingAccounts/([^/\s]+)$') {
+                $accountId = $Matches[1]
+            }
+        } catch {
+            $accountId = ""
+        }
+    }
+    Write-Host ""
+    Write-Host "Monthly budget alert of 10 in the billing account currency (about 10 USD when that account uses USD)."
+    Write-Host "This script does not create the budget, so a rerun will not add a second one."
+    if ([string]::IsNullOrWhiteSpace($accountId)) {
+        $accountId = "BILLING_ACCOUNT_ID"
+        Write-Host "A billing account was not detected. In Cloud Console open Billing, then Budgets and alerts, and create a monthly budget of 10."
+        Write-Host "Or replace BILLING_ACCOUNT_ID and run this once:"
+    } else {
+        Write-Host "Run this once if you want the alert. Thresholds are 50 percent, 90 percent, and 100 percent:"
+    }
+    $command = "gcloud billing budgets create --billing-account=$accountId --display-name=""BayOS gateway 10 USD"" --budget-amount=10 --filter-projects=projects/$ProjectId --calendar-period=month --threshold-rule=percent=0.5 --threshold-rule=percent=0.9 --threshold-rule=percent=1.0"
+    Write-Host $command
+}
+
 function Invoke-GatewayRequest {
     param(
         [Parameter(Mandatory = $true)][string]$Method,
@@ -310,6 +412,8 @@ function Invoke-GatewayRequest {
 if ($MyInvocation.InvocationName -ne '.') {
 
 $AuthKey = $null
+$ProjectId = $null
+$ShowBudget = $false
 
 try {
     Set-Location -Path $PSScriptRoot
@@ -393,7 +497,7 @@ try {
     Save-SecretValue -Name $AuthSecretName -Value $AuthKey
 
     Write-Host ""
-    Write-Host "Step 5 of 6: let Cloud Run call Vertex AI and Firestore, and read the gateway key"
+    Write-Host "Step 5 of 6: create the runtime service account and grant only the roles it needs"
     $projectInfo = Invoke-Gcloud -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
     $projectNumber = ""
     if ($projectInfo.Output) {
@@ -403,36 +507,52 @@ try {
         throw "Could not read the project number for $ProjectId."
     }
     $projectNumber = $projectNumber.Trim()
-    $RuntimeSa = "$projectNumber-compute@developer.gserviceaccount.com"
-    Write-Host "Service account: $RuntimeSa"
-    Write-Host "Granting Cloud Run Builder so Cloud Build can deploy. The first grant can take a couple of minutes to spread."
-    $null = Invoke-Gcloud -ArgumentList @(
+    $ComputeSa = "$projectNumber-compute@developer.gserviceaccount.com"
+    $CloudBuildSa = "$projectNumber@cloudbuild.gserviceaccount.com"
+    $RuntimeSa = Ensure-GatewayServiceAccount -ProjectId $ProjectId
+    Write-Host "Runtime service account: $RuntimeSa"
+    Write-Host "Granting Cloud Run Builder on the Compute Engine account so Cloud Build can deploy."
+    Write-Host "The runtime account does not receive that role. The first grant can take a couple of minutes to spread."
+    Add-IamBinding -Required -ArgumentList @(
         "projects", "add-iam-policy-binding", $ProjectId,
-        "--member", "serviceAccount:$RuntimeSa",
+        "--member", "serviceAccount:$ComputeSa",
         "--role", "roles/run.builder",
         "--quiet"
     )
-    $null = Invoke-Gcloud -ArgumentList @(
+    Write-Host "Letting Cloud Build deploy the service as $RuntimeSa."
+    Add-IamBinding -Required -ArgumentList @(
+        "iam", "service-accounts", "add-iam-policy-binding", $RuntimeSa,
+        "--member", "serviceAccount:$ComputeSa",
+        "--role", "roles/iam.serviceAccountUser",
+        "--quiet"
+    )
+    Add-IamBinding -ArgumentList @(
+        "iam", "service-accounts", "add-iam-policy-binding", $RuntimeSa,
+        "--member", "serviceAccount:$CloudBuildSa",
+        "--role", "roles/iam.serviceAccountUser",
+        "--quiet"
+    )
+    Write-Host "Granting the runtime account access to the gateway key, Vertex AI, and Firestore."
+    Add-IamBinding -Required -ArgumentList @(
         "secrets", "add-iam-policy-binding", $AuthSecretName,
         "--member", "serviceAccount:$RuntimeSa",
         "--role", "roles/secretmanager.secretAccessor",
         "--quiet"
     )
-    Write-Host "Granting Vertex AI User so the service account can call Gemini."
-    $null = Invoke-Gcloud -ArgumentList @(
+    Add-IamBinding -Required -ArgumentList @(
         "projects", "add-iam-policy-binding", $ProjectId,
         "--member", "serviceAccount:$RuntimeSa",
         "--role", "roles/aiplatform.user",
         "--quiet"
     )
-    Write-Host "Granting Cloud Datastore User so the service account can read and write the inbox."
-    $null = Invoke-Gcloud -ArgumentList @(
+    Add-IamBinding -Required -ArgumentList @(
         "projects", "add-iam-policy-binding", $ProjectId,
         "--member", "serviceAccount:$RuntimeSa",
         "--role", "roles/datastore.user",
         "--quiet"
     )
     Ensure-FirestoreDatabase
+    Show-LegacyComputeNote -ProjectId $ProjectId -ComputeSa $ComputeSa
 
     Write-Host ""
     Write-Host "Step 6 of 6: deploy bayos-gateway from this folder"
@@ -446,6 +566,7 @@ try {
         "--platform", "managed",
         "--min-instances", $MinInstances,
         "--max-instances", $MaxInstances,
+        "--concurrency", $Concurrency,
         "--memory", "512Mi",
         "--allow-unauthenticated",
         "--service-account", $RuntimeSa,
@@ -465,6 +586,7 @@ try {
         throw "The deploy command finished, but the service URL could not be read."
     }
     $serviceUrl = $serviceUrl.Trim().TrimEnd("/")
+    $ShowBudget = $true
 
     Write-Host ""
     Write-Host "Smoke test: /health"
@@ -479,23 +601,25 @@ try {
             if ($attempt -ge 6) {
                 throw
             }
-            Write-Host "The service is still starting. Waiting 10 seconds..."
-            Start-Sleep -Seconds 10
+            Write-Host "The service is still starting. Waiting 20 seconds..."
+            Start-Sleep -Seconds 20
             continue
         }
-        $backendReady = ($health.gemini_backend -eq "vertex" -and $health.gemini_location -eq "global" -and $health.inbox_storage -eq "firestore")
-        if ($backendReady) {
+        if ($health.status -eq "healthy" -and $health.inbox_storage -eq "firestore") {
             break
         }
         if ($attempt -ge 6) {
             break
         }
-        Write-Host "Waiting for Vertex and Firestore permissions to spread..."
+        Write-Host "Waiting for Firestore permissions to spread..."
         Start-Sleep -Seconds 20
     }
-    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version) + ", gemini " + ($health.gemini_backend) + " " + ($health.gemini_location) + " " + ($health.gemini_model) + ", inbox " + ($health.inbox_storage))
-    if ($health.gemini_backend -ne "vertex" -or $health.gemini_location -ne "global") {
-        throw "Health reported Gemini backend '$($health.gemini_backend)' at '$($health.gemini_location)'. Expected vertex at global. Pull the latest copy and run this script again."
+    if ($null -eq $health) {
+        throw "Health did not respond. Wait two minutes and run .\deploy.ps1 again."
+    }
+    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version) + ", inbox " + ($health.inbox_storage))
+    if ($health.status -ne "healthy") {
+        throw "Health status was '$($health.status)'. Expected healthy."
     }
     if ($health.inbox_storage -ne "firestore") {
         throw "Health reported inbox_storage '$($health.inbox_storage)'. Expected firestore. Wait two minutes and run .\deploy.ps1 again so roles/datastore.user can spread."
@@ -507,6 +631,12 @@ try {
     $posted = Invoke-GatewayRequest -Method "Post" -Uri ($serviceUrl + "/api/v1/inbox") -Headers $headers -JsonBody $postJson
     if ([string]::IsNullOrWhiteSpace([string]$posted.id)) {
         throw "The inbox post did not return an id."
+    }
+    if (-not $posted.untrusted) {
+        throw "The inbox post did not mark the item untrusted."
+    }
+    if ([string]$posted.agent_view -notmatch 'UNTRUSTED_INBOX') {
+        throw "The inbox post did not include an agent_view wrapper."
     }
     $unread = Invoke-GatewayRequest -Method "Get" -Uri ($serviceUrl + "/api/v1/inbox?unread=true&limit=20") -Headers $headers
     if ($unread.storage -ne "firestore") {
@@ -574,6 +704,9 @@ try {
     Write-Host ""
     Write-Host "The gateway key was not printed. Keep it in your password manager."
 } finally {
+    if ($ShowBudget -and -not [string]::IsNullOrWhiteSpace($ProjectId)) {
+        Show-BudgetHint -ProjectId $ProjectId
+    }
     $AuthKey = $null
 }
 
