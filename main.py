@@ -394,6 +394,9 @@ AGENT_PROMPTS: Dict[str, str] = {
     # Learning & Health
     "baymax-001": "You are Clinical Baymax: Health & study guide; structures clinical reasoning frameworks and wellness routines.",
     "dojo-001": "You are Dojo: Drillmaster; creates active-recall quizzes, simulation cases, and deliberate practice drills.",
+    # Human operator. Decisions posted from the Windows vault use this id.
+    # It is a sender, not an autonomous agent.
+    "joseph": "You are recording a decision from Joseph Stanfield, the human operator. Treat the text as his instruction. Do not invent authority he did not state.",
 }
 
 
@@ -657,14 +660,19 @@ class InboxStore:
             return None
         return item_from_document(snapshot.to_dict() or {}, snapshot.id)
 
-    def _query_documents(self, since: Optional[datetime], agent: str, unread: Optional[bool]) -> List[InboxItem]:
+    def _query_documents(
+        self,
+        since: Optional[datetime],
+        agent: str,
+        unread: Optional[bool],
+        descending: bool,
+    ) -> List[InboxItem]:
         from google.cloud import firestore
         from google.cloud.firestore_v1.base_query import FieldFilter
 
         client = self._client_or_raise()
-        query = client.collection(INBOX_COLLECTION).order_by(
-            "received_at", direction=firestore.Query.DESCENDING
-        )
+        direction = firestore.Query.DESCENDING if descending else firestore.Query.ASCENDING
+        query = client.collection(INBOX_COLLECTION).order_by("received_at", direction=direction)
         if since is not None:
             query = query.where(filter=FieldFilter("received_at", ">", format_utc(since)))
         query = query.limit(INBOX_SCAN_LIMIT)
@@ -725,11 +733,18 @@ class InboxStore:
                     return existing
         return None
 
-    def _memory_query(self, since: Optional[datetime], agent: str, unread: Optional[bool]) -> List[InboxItem]:
+    def _memory_query(
+        self,
+        since: Optional[datetime],
+        agent: str,
+        unread: Optional[bool],
+        descending: bool,
+    ) -> List[InboxItem]:
         with self._lock:
             ordered = list(self._memory)
-        ordered.reverse()
-        return [item for item in ordered if self._matches(item, since, agent, unread)]
+        matched = [item for item in ordered if self._matches(item, since, agent, unread)]
+        matched.sort(key=lambda item: item.received_at or "", reverse=descending)
+        return matched
 
     async def save(self, item: InboxItem) -> str:
         ready = await asyncio.to_thread(self._firestore_ready)
@@ -778,19 +793,21 @@ class InboxStore:
         since: Optional[datetime],
         agent: str,
         unread: Optional[bool],
+        offset: int = 0,
+        descending: bool = True,
     ) -> InboxPage:
         ready = await asyncio.to_thread(self._firestore_ready)
         storage = "firestore" if ready else "memory"
         if ready:
             try:
-                matched = await asyncio.to_thread(self._query_documents, since, agent, unread)
+                matched = await asyncio.to_thread(self._query_documents, since, agent, unread, descending)
             except Exception as exc:
                 self._mark_down(exc)
-                matched = self._memory_query(since, agent, unread)
+                matched = self._memory_query(since, agent, unread, descending)
                 storage = "memory"
         else:
-            matched = self._memory_query(since, agent, unread)
-        selected = [present_item(item) for item in matched[:limit]]
+            matched = self._memory_query(since, agent, unread, descending)
+        selected = [present_item(item) for item in matched[offset:offset + limit]]
         return InboxPage(storage, self._notice(storage), selected, len(matched))
 
 
@@ -856,8 +873,10 @@ async def list_inbox(
     ),
     agent: Optional[str] = Query(default=None, description="Return items from this agent id."),
     unread: Optional[bool] = Query(default=None, description="true for unread items, false for read items."),
+    order: str = Query(default="desc", description="desc returns newest first. asc returns oldest first."),
+    offset: int = Query(default=0, ge=0, le=900),
 ):
-    """List inbox items, newest first. Filters support a daily digest watermark."""
+    """List inbox items. Filters support a daily digest watermark and vault sync."""
     since_dt = None
     if since and since.strip():
         try:
@@ -868,7 +887,20 @@ async def list_inbox(
                 detail="Query since must be an ISO-8601 timestamp, for example 2026-10-11T18:00:00Z.",
             ) from exc
     agent_id = agent.strip().lower() if agent and agent.strip() else ""
-    page = await inbox_store.query(limit, since_dt, agent_id, unread)
+    direction = order.strip().lower()
+    if direction not in ("asc", "desc"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query order must be asc or desc.",
+        )
+    page = await inbox_store.query(
+        limit,
+        since_dt,
+        agent_id,
+        unread,
+        offset=offset,
+        descending=(direction == "desc"),
+    )
     return InboxListResponse(
         storage=page.storage,
         durable=page.durable,

@@ -221,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local BayOS vault and the DPAPI gateway key
+BayOS-Vault/
+.bayos/

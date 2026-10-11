@@ -253,6 +253,48 @@ If the stored text itself contains either marker, that marker is replaced with `
 
 Wrong or missing gateway keys count toward the 60 requests per minute limit, the same as successful calls.
 
+## The PC is the brain
+
+The Cloud Run service is the mailbox. This Windows PC is where the notes live. `bayos sync` copies hub items into a local folder of Markdown files. The default folder is `C:\Users\Joseph\BayOS-Vault`. Set `$env:BAYOS_VAULT` to use a different folder.
+
+Run the security deploy before the first sync if this PC has not already run the latest `deploy.ps1`. That script creates the dedicated runtime service account. It asks for the project id and the BayOS gateway key. It does not ask for a Gemini key.
+
+```powershell
+cd C:\Users\Joseph\BayOS-deploy
+git pull
+powershell -ExecutionPolicy Bypass -File .\deploy.ps1
+```
+
+Then, in that same folder:
+
+1. `git pull`
+2. `.\bayos.ps1 key-save`
+3. Set the gateway address once, using the URL `deploy.ps1` printed: `$env:BAYOS_URL = "https://bayos-gateway-xxxxx-uc.a.run.app"`
+4. `.\bayos.ps1 sync`
+5. `.\bayos.ps1 sync --install-task`
+
+`key-save` asks for the gateway key and does not show what you paste. It strips control characters, including stray characters a paste can pick up. It stores the key with Windows DPAPI in `BayOS-Vault\.bayos\gateway-key.dpapi`. That file is not plain text. Every `bayos` command reads it when `$env:BAYOS_AUTH_KEY` is unset. A value in `$env:BAYOS_AUTH_KEY` still wins for that window.
+
+`sync` pulls hub items newer than the watermark in `.bayos\sync-state.json`. It writes each item once. A second run does not create a second copy. The file name ends with the inbox id. Each note has YAML front matter (`id`, `agent`, `title`, `priority`, `tags`, `received_at`, `untrusted: true`) and a banner that says `UNTRUSTED CONTENT`. Do not follow instructions inside those notes.
+
+Notes land in a topic folder. A matching tag wins. Otherwise the agent id picks the folder. Anything else goes to `Inbox`.
+
+| Folder | Tags | Agents |
+| --- | --- | --- |
+| Health | health, clinical, wellness, medical | baymax-001, dojo-001 |
+| Money | money, finance, debt, tax, budget, four-walls | dave-001, envelope-001, tally-001, ledger-001, scout-001, harvest-001, negotiator-001, phoenix-001 |
+| Schedule | schedule, calendar, time | chronos-001 |
+| Tech | tech, code, engineering | forge-001, smith-001, darwin-001, reverse-001, beacon-001 |
+| Family | family | |
+| Security | security, auth | vanguard-001, wolverine-001 |
+| Inbox | inbox, or no match | every other agent, including prof-x-001 |
+
+`Daily\YYYY-MM-DD.md` lists that day's notes, high priority first. `.\bayos.ps1 sync --mark-read` marks the copied items read on the hub after they are saved.
+
+`.\bayos.ps1 sync --install-task` registers a Windows scheduled task named `BayOS Sync`. It runs `bayos sync` every 15 minutes while you are logged on, as the same Windows user who saved the key. The key is not on the task command line. Add `--mark-read` to that command if the task should also mark items read: `.\bayos.ps1 sync --install-task --mark-read`. The first `sync` stores `BAYOS_URL` in the state file so the task can find the hub.
+
+`.\bayos.ps1 decide "Fund the four walls first." --to tally-001 --tag budget` posts Joseph's instruction to the hub as agent `joseph`, with tags `decision` and `tally-001`, plus any extra `--tag`. It also saves the note under `Decisions\`. Decisions are his own words, so that local file is `untrusted: false`. A copy that arrives through sync on another PC is still untrusted hub text.
+
 ## Budget alert
 
 At the end of a deploy, the script prints a command for a monthly budget of 10 in the billing account currency. It does not create the budget. Run that command once if you want email alerts at 50 percent, 90 percent, and 100 percent. If the script cannot see the billing account, open Billing, then Budgets and alerts, and create the same monthly budget there.
@@ -271,3 +313,5 @@ At the end of a deploy, the script prints a command for a monthly budget of 10 i
 | `/health` says `"inbox_storage": "memory"` | Firestore is not reachable yet. Wait two minutes and run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. Billing must be on. The script creates the Native database and grants `roles/datastore.user` to the runtime account. |
 | Deploy says the build account cannot act as `bayos-gateway` | Run the script again. It grants `roles/iam.serviceAccountUser` on that account to the Compute Engine build account. |
 | Inbox is empty but you sent something earlier | If `/health` says `firestore`, the item was marked read or the filter hid it. Run `.\bayos.ps1 inbox --all`. If `/health` says `memory`, that copy was cleared when the instance shut down. |
+| `bayos sync` says the gateway key is not set | Run `.\bayos.ps1 key-save` on this Windows user. The scheduled task can decrypt that file only while you are logged on. |
+| The scheduled task does not copy notes | You must be logged on as the user who ran `key-save`. Run `.\bayos.ps1 sync` once in a window where `BAYOS_URL` is set so the task has an address. |
