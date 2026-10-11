@@ -9,6 +9,7 @@ import hmac
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from collections import defaultdict, deque
@@ -109,21 +110,16 @@ async def check_rate_limit(request: Request, api_key: str = Depends(verify_auth_
         )
 
 
-# 4. In-memory inbox.
-# Cloud Run with min-instances 0 drops this deque when the instance shuts down.
-# A cheap durable replacement is Cloud Firestore (Native mode), collection "inbox":
-# write one document per ingest and list the newest documents from GET /api/v1/inbox.
-# That store is not wired up here.
+# 4. Inbox. Firestore Native collection "inbox" is the durable store.
+# The in-memory deque is the fallback when that database cannot be reached.
 INBOX_CAPACITY = 100
+INBOX_SCAN_LIMIT = 1000
+INBOX_COLLECTION = "inbox"
 MAX_STORED_TASK_CHARS = 20_000
 MAX_STORED_OUTPUT_CHARS = 50_000
-INBOX_NOTICE = (
-    "In-memory only. This list is wiped when the Cloud Run instance scales to zero, "
-    "and separate instances do not share it. A cheap durable replacement is Cloud Firestore "
-    "(Native mode), collection inbox."
-)
+_INBOX_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_PRIORITIES = {"low", "normal", "high"}
 
-_inbox: Deque["InboxItem"] = deque(maxlen=INBOX_CAPACITY)
 _gemini_client: Optional[genai.Client] = None
 
 
@@ -365,6 +361,21 @@ class InboxItem(BaseModel):
     status: str
     output: str
     version: str = "2.4.0"
+    title: str = ""
+    body: str = ""
+    priority: str = "normal"
+    tags: List[str] = Field(default_factory=list)
+    unread: bool = True
+    source: str = "ingest"
+    read_at: Optional[str] = None
+
+
+class InboxPostRequest(BaseModel):
+    agent: str = Field(..., min_length=1, description="Registered agent identifier.")
+    title: str = Field(..., min_length=1, max_length=200)
+    body: str = Field(..., min_length=1, max_length=50_000)
+    priority: str = Field(default="normal", description="low, normal, or high.")
+    tags: List[str] = Field(default_factory=list)
 
 
 class InboxListResponse(BaseModel):
@@ -375,6 +386,328 @@ class InboxListResponse(BaseModel):
     total: int
     count: int
     items: List[InboxItem]
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_utc(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp. Naive values are treated as UTC."""
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def format_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def clean_tags(tags: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    seen = set()
+    for tag in tags:
+        text = tag.strip()
+        if not text:
+            continue
+        if len(text) > 40:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Each tag must be 40 characters or fewer.",
+            )
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+        if len(cleaned) > 10:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At most 10 tags are allowed.",
+            )
+    return cleaned
+
+
+def item_to_document(item: InboxItem) -> Dict[str, Any]:
+    data = item.model_dump()
+    data["read_at"] = item.read_at or ""
+    data["tags"] = list(item.tags)
+    return data
+
+
+def item_from_document(data: Dict[str, Any], doc_id: str) -> InboxItem:
+    payload = dict(data)
+    payload["id"] = str(payload.get("id") or doc_id)
+    received = payload.get("received_at")
+    if isinstance(received, datetime):
+        payload["received_at"] = format_utc(received)
+    read_at = payload.get("read_at")
+    if read_at == "" or read_at is None:
+        payload["read_at"] = None
+    elif isinstance(read_at, datetime):
+        payload["read_at"] = format_utc(read_at)
+    tags = payload.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    payload["tags"] = [str(tag) for tag in tags if str(tag).strip()]
+    return InboxItem.model_validate(payload)
+
+
+class InboxPage:
+    def __init__(self, storage: str, notice: str, items: List[InboxItem], total: int):
+        self.storage = storage
+        self.notice = notice
+        self.items = items
+        self.total = total
+
+    @property
+    def durable(self) -> bool:
+        return self.storage == "firestore"
+
+    @property
+    def cleared_on_scale_to_zero(self) -> bool:
+        return self.storage != "firestore"
+
+
+class InboxStore:
+    """Firestore collection `inbox`, with an in-memory deque when that is unreachable."""
+
+    def __init__(self) -> None:
+        self._memory: Deque[InboxItem] = deque(maxlen=INBOX_CAPACITY)
+        self._lock = threading.Lock()
+        self._client: Any = None
+        self._override: Optional[str] = None
+        self._probe_ok: Optional[bool] = None
+        self._probe_until = 0.0
+        self._last_error = ""
+
+    def reset_for_tests(self) -> None:
+        with self._lock:
+            self._memory.clear()
+        self._client = None
+        self._override = None
+        self._probe_ok = None
+        self._probe_until = 0.0
+        self._last_error = ""
+
+    def attach_client(self, client: Any) -> None:
+        """Use a stand-in Firestore client. Tests call this; Cloud Run does not."""
+        self._client = client
+        self._override = "firestore"
+        self._probe_ok = None
+        self._probe_until = 0.0
+        self._last_error = ""
+
+    def _wanted(self) -> str:
+        forced = os.environ.get("BAYOS_INBOX_STORAGE", "").strip().lower()
+        if forced == "memory":
+            return "memory"
+        if self._override == "firestore" or forced == "firestore":
+            return "firestore"
+        if os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip():
+            return "firestore"
+        return "memory"
+
+    def _notice(self, storage: str) -> str:
+        if storage == "firestore":
+            return (
+                "Stored in Cloud Firestore (Native mode), collection inbox, in this project. "
+                "Items remain when Cloud Run scales to zero."
+            )
+        text = (
+            "In-memory only. This list is wiped when the Cloud Run instance scales to zero, "
+            "and separate instances do not share it."
+        )
+        if self._last_error:
+            text += f" Firestore was not reachable ({self._last_error})."
+        return text
+
+    def _mark_down(self, exc: Exception) -> None:
+        self._probe_ok = False
+        self._probe_until = time.time() + 5
+        self._last_error = type(exc).__name__
+        logger.warning("Firestore inbox unavailable: %s", type(exc).__name__)
+
+    def _client_or_raise(self) -> Any:
+        if self._client is not None:
+            return self._client
+        project = os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        if not project:
+            raise RuntimeError("GOOGLE_CLOUD_PROJECT is not set")
+        from google.cloud import firestore
+
+        self._client = firestore.Client(project=project)
+        return self._client
+
+    def _probe(self) -> None:
+        client = self._client_or_raise()
+        query = client.collection(INBOX_COLLECTION).limit(1)
+        list(query.stream(timeout=8))
+        self._flush_memory()
+
+    def _flush_memory(self) -> None:
+        with self._lock:
+            pending = list(self._memory)
+        if not pending:
+            return
+        for item in pending:
+            self._write_document(item)
+        with self._lock:
+            self._memory.clear()
+
+    def _write_document(self, item: InboxItem) -> None:
+        client = self._client_or_raise()
+        client.collection(INBOX_COLLECTION).document(item.id).set(item_to_document(item), timeout=8)
+
+    def _read_document(self, item_id: str) -> Optional[InboxItem]:
+        client = self._client_or_raise()
+        snapshot = client.collection(INBOX_COLLECTION).document(item_id).get(timeout=8)
+        if not getattr(snapshot, "exists", False):
+            return None
+        return item_from_document(snapshot.to_dict() or {}, snapshot.id)
+
+    def _query_documents(self, since: Optional[datetime], agent: str, unread: Optional[bool]) -> List[InboxItem]:
+        from google.cloud import firestore
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
+        client = self._client_or_raise()
+        query = client.collection(INBOX_COLLECTION).order_by(
+            "received_at", direction=firestore.Query.DESCENDING
+        )
+        if since is not None:
+            query = query.where(filter=FieldFilter("received_at", ">", format_utc(since)))
+        query = query.limit(INBOX_SCAN_LIMIT)
+        found: List[InboxItem] = []
+        for snapshot in query.stream(timeout=8):
+            item = item_from_document(snapshot.to_dict() or {}, snapshot.id)
+            if not self._matches(item, since, agent, unread):
+                continue
+            found.append(item)
+        return found
+
+    def _matches(self, item: InboxItem, since: Optional[datetime], agent: str, unread: Optional[bool]) -> bool:
+        if since is not None:
+            try:
+                received = parse_utc(item.received_at)
+            except ValueError:
+                return False
+            if received <= since:
+                return False
+        if agent and item.agent != agent:
+            return False
+        if unread is not None and item.unread != unread:
+            return False
+        return True
+
+    def _firestore_ready(self) -> bool:
+        if self._wanted() != "firestore":
+            return False
+        now = time.time()
+        if self._probe_ok is not None and now < self._probe_until:
+            return self._probe_ok
+        try:
+            self._probe()
+        except Exception as exc:
+            self._mark_down(exc)
+            return False
+        self._probe_ok = True
+        self._probe_until = time.time() + 60
+        self._last_error = ""
+        return True
+
+    async def storage_name(self) -> str:
+        ready = await asyncio.to_thread(self._firestore_ready)
+        return "firestore" if ready else "memory"
+
+    def _memory_upsert(self, item: InboxItem) -> None:
+        with self._lock:
+            for index, existing in enumerate(self._memory):
+                if existing.id == item.id:
+                    self._memory[index] = item
+                    return
+            self._memory.append(item)
+
+    def _memory_get(self, item_id: str) -> Optional[InboxItem]:
+        with self._lock:
+            for existing in self._memory:
+                if existing.id == item_id:
+                    return existing
+        return None
+
+    def _memory_query(self, since: Optional[datetime], agent: str, unread: Optional[bool]) -> List[InboxItem]:
+        with self._lock:
+            ordered = list(self._memory)
+        ordered.reverse()
+        return [item for item in ordered if self._matches(item, since, agent, unread)]
+
+    async def save(self, item: InboxItem) -> str:
+        ready = await asyncio.to_thread(self._firestore_ready)
+        if ready:
+            try:
+                await asyncio.to_thread(self._write_document, item)
+                return "firestore"
+            except Exception as exc:
+                self._mark_down(exc)
+        self._memory_upsert(item)
+        return "memory"
+
+    async def mark_read(self, item_id: str) -> Optional[InboxItem]:
+        ready = await asyncio.to_thread(self._firestore_ready)
+        if ready:
+            try:
+                item = await asyncio.to_thread(self._read_document, item_id)
+            except Exception as exc:
+                self._mark_down(exc)
+                item = None
+                ready = False
+            if ready and item is not None:
+                if item.unread:
+                    item.unread = False
+                    item.read_at = utc_now()
+                    try:
+                        await asyncio.to_thread(self._write_document, item)
+                    except Exception as exc:
+                        self._mark_down(exc)
+                        self._memory_upsert(item)
+                return item
+            if ready and item is None and self._memory_get(item_id) is None:
+                return None
+        item = self._memory_get(item_id)
+        if item is None:
+            return None
+        if item.unread:
+            item.unread = False
+            item.read_at = utc_now()
+            self._memory_upsert(item)
+        return item
+
+    async def query(
+        self,
+        limit: int,
+        since: Optional[datetime],
+        agent: str,
+        unread: Optional[bool],
+    ) -> InboxPage:
+        ready = await asyncio.to_thread(self._firestore_ready)
+        storage = "firestore" if ready else "memory"
+        if ready:
+            try:
+                matched = await asyncio.to_thread(self._query_documents, since, agent, unread)
+            except Exception as exc:
+                self._mark_down(exc)
+                matched = self._memory_query(since, agent, unread)
+                storage = "memory"
+        else:
+            matched = self._memory_query(since, agent, unread)
+        selected = matched[:limit]
+        return InboxPage(storage, self._notice(storage), selected, len(matched))
+
+
+inbox_store = InboxStore()
 
 
 async def run_inference(agent_id: str, system_instruction: str, task: str) -> str:
@@ -433,7 +766,7 @@ async def health_check():
         "gemini_location": gemini_location() if gemini_backend() == "vertex" else "",
         "gemini_model": gemini_model(),
         "inference_mode": inference_mode(),
-        "inbox_storage": "memory",
+        "inbox_storage": await inbox_store.storage_name(),
     }
 
 
@@ -443,20 +776,106 @@ async def health_check():
     dependencies=[Depends(verify_auth_key), Depends(check_rate_limit)],
     tags=["Inbox"],
 )
-async def list_inbox(limit: int = Query(default=20, ge=1, le=100)):
-    """List recently ingested tasks, newest first."""
-    ordered = list(_inbox)
-    ordered.reverse()
-    selected = ordered[:limit]
+async def list_inbox(
+    limit: int = Query(default=20, ge=1, le=100),
+    since: Optional[str] = Query(
+        default=None,
+        description="Return items received after this ISO-8601 timestamp. The instant itself is excluded.",
+    ),
+    agent: Optional[str] = Query(default=None, description="Return items from this agent id."),
+    unread: Optional[bool] = Query(default=None, description="true for unread items, false for read items."),
+):
+    """List inbox items, newest first. Filters support a daily digest watermark."""
+    since_dt = None
+    if since and since.strip():
+        try:
+            since_dt = parse_utc(since)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Query since must be an ISO-8601 timestamp, for example 2026-10-11T18:00:00Z.",
+            ) from exc
+    agent_id = agent.strip().lower() if agent and agent.strip() else ""
+    page = await inbox_store.query(limit, since_dt, agent_id, unread)
     return InboxListResponse(
-        storage="memory",
-        durable=False,
-        cleared_on_scale_to_zero=True,
-        notice=INBOX_NOTICE,
-        total=len(_inbox),
-        count=len(selected),
-        items=selected,
+        storage=page.storage,
+        durable=page.durable,
+        cleared_on_scale_to_zero=page.cleared_on_scale_to_zero,
+        notice=page.notice,
+        total=page.total,
+        count=len(page.items),
+        items=page.items,
     )
+
+
+@app.post(
+    "/api/v1/inbox",
+    response_model=InboxItem,
+    dependencies=[Depends(verify_auth_key), Depends(check_rate_limit)],
+    tags=["Inbox"],
+)
+async def post_inbox(payload: InboxPostRequest):
+    """Store an agent result. This does not call Gemini."""
+    agent_id = payload.agent.strip().lower()
+    if agent_id not in AGENT_PROMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{payload.agent}' not recognized. Registered count: {len(AGENT_PROMPTS)}.",
+        )
+    title = payload.title.strip()
+    body = payload.body.strip()
+    if not title or not body:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Title and body are required.",
+        )
+    priority = (payload.priority or "normal").strip().lower()
+    if priority not in _PRIORITIES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Priority must be low, normal, or high.",
+        )
+    tags = clean_tags(payload.tags)
+    item = InboxItem(
+        id=uuid.uuid4().hex,
+        received_at=utc_now(),
+        agent=agent_id,
+        task=title,
+        status="stored",
+        output=clip_text(body, MAX_STORED_OUTPUT_CHARS),
+        title=title,
+        body=clip_text(body, MAX_STORED_OUTPUT_CHARS),
+        priority=priority,
+        tags=tags,
+        unread=True,
+        source="post",
+    )
+    await inbox_store.save(item)
+    logger.info("Inbox post id=%s agent=%s priority=%s", item.id, agent_id, priority)
+    return item
+
+
+@app.post(
+    "/api/v1/inbox/{item_id}/read",
+    response_model=InboxItem,
+    dependencies=[Depends(verify_auth_key), Depends(check_rate_limit)],
+    tags=["Inbox"],
+)
+async def mark_inbox_read(item_id: str):
+    """Mark one inbox item read. A later unread list will not return it."""
+    if not _INBOX_ID_RE.match(item_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inbox id must be 32 hex characters.",
+        )
+    item = await inbox_store.mark_read(item_id)
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Inbox item was not found.",
+        )
+    logger.info("Inbox read id=%s agent=%s", item.id, item.agent)
+    return item
 
 
 @app.post(
@@ -468,7 +887,7 @@ async def list_inbox(limit: int = Query(default=20, ge=1, le=100)):
 async def ingest_task(payload: TaskIngestRequest):
     """
     Ingests, validates, and routes tasks to target BayOS agents.
-    Records the task in the in-memory inbox so it can be read back.
+    Records the task in the inbox so it can be read back.
     4. Offloads blocking Gemini API calls to an async threadpool.
     """
     agent_id = payload.agent.lower()
@@ -480,16 +899,20 @@ async def ingest_task(payload: TaskIngestRequest):
             detail=f"Agent '{payload.agent}' not recognized. Registered count: {len(AGENT_PROMPTS)}.",
         )
 
+    task_text = clip_text(payload.task, MAX_STORED_TASK_CHARS)
     record = InboxItem(
         id=uuid.uuid4().hex,
-        received_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        received_at=utc_now(),
         agent=agent_id,
-        task=clip_text(payload.task, MAX_STORED_TASK_CHARS),
+        task=task_text,
         status="pending",
         output="",
+        title=clip_text(payload.task, 200),
+        body="",
+        source="ingest",
         version="2.4.0",
     )
-    _inbox.append(record)
+    await inbox_store.save(record)
 
     try:
         output_text = await run_inference(agent_id, system_instruction, payload.task)
@@ -497,11 +920,15 @@ async def ingest_task(payload: TaskIngestRequest):
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
         record.status = "failed"
         record.output = clip_text(detail, MAX_STORED_OUTPUT_CHARS)
+        record.body = record.output
+        await inbox_store.save(record)
         logger.info("Ingest id=%s agent=%s status=failed", record.id, agent_id)
         raise
 
     record.status = "completed"
     record.output = clip_text(output_text, MAX_STORED_OUTPUT_CHARS)
+    record.body = record.output
+    await inbox_store.save(record)
     logger.info("Ingest id=%s agent=%s status=completed", record.id, agent_id)
     return TaskIngestResponse(
         agent=agent_id,

@@ -6,6 +6,8 @@ The gateway checks a private key on every send and inbox call. That key lives in
 
 Gemini is called through Vertex AI as the Cloud Run service account. No Gemini API key is stored. AI Studio keys that start with `AQ.` are rejected by the Generative Language API with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` even when the full key is sent in `x-goog-api-key`.
 
+Inbox items are stored in Cloud Firestore (Native mode), collection `inbox`, using that same service account. If Firestore cannot be reached, the gateway keeps the list in memory and `/health` reports `"inbox_storage": "memory"`.
+
 The service is deployed with a minimum of 0 instances in `us-central1` (Iowa). The address stays. When nobody is calling it, Google shuts the running copy down so you are not paying for an idle server. The first call after a quiet period can take several seconds while a new copy starts.
 
 ## Commands, in order
@@ -105,7 +107,7 @@ gcloud config set project YOUR_PROJECT_ID
 ### 6. Turn on the APIs
 
 ```powershell
-gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com
+gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com firestore.googleapis.com
 ```
 
 - **Cloud Run** hosts the gateway.
@@ -113,6 +115,7 @@ gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactr
 - **Artifact Registry** stores the built container.
 - **Cloud Build** builds that container from this folder.
 - **Vertex AI** (`aiplatform.googleapis.com`) is how the service calls Gemini.
+- **Firestore** (`firestore.googleapis.com`) stores the inbox.
 
 The first time, this step can take a few minutes.
 
@@ -128,13 +131,16 @@ Do not put these keys in a `.env` file, the Dockerfile, or a command you copy in
 
 ### 8. Let Cloud Run read the secret and call Vertex AI
 
-The script grants the project's Compute Engine service account three roles:
+The script grants the project's Compute Engine service account four roles:
 
 - `roles/run.builder`, so Cloud Build can build and deploy.
 - `roles/secretmanager.secretAccessor` on `bayos-auth-key`, so the running service can read the gateway key.
 - `roles/aiplatform.user`, so that same service account can call Gemini on Vertex AI.
+- `roles/datastore.user`, so that same service account can read and write Firestore.
 
-The first grant can take a couple of minutes to spread. If the deploy or the ingest smoke test says permission denied, wait two minutes and run `.\deploy.ps1` again. Paste the same gateway key when it asks.
+It also creates the Native Firestore database `(default)` in `nam5` when that database is missing. `nam5` is the United States multi-region and includes Iowa, where Cloud Run runs. If the database already exists, the script keeps its location. A second run does not create another database and does not ask for a Gemini key.
+
+The first grant can take a couple of minutes to spread. If the deploy, the inbox smoke test, or the ingest smoke test says permission denied, wait two minutes and run `.\deploy.ps1` again. Paste the same gateway key when it asks.
 
 ### 9. Deploy
 
@@ -172,28 +178,60 @@ Invoke-RestMethod -Method Post -Uri "$env:BAYOS_URL/api/v1/task/ingest" -Headers
 Invoke-RestMethod -Uri "$env:BAYOS_URL/api/v1/inbox" -Headers $headers
 ```
 
-`/health` should show `"status": "healthy"`, `"gemini_backend": "vertex"`, `"gemini_location": "global"`, and `"gemini_model": "gemini-3.8-flash"`. The ingest call should show `"status": "completed"` and a short reply. The inbox call should list that message.
+`/health` should show `"status": "healthy"`, `"gemini_backend": "vertex"`, `"gemini_location": "global"`, `"gemini_model": "gemini-3.8-flash"`, and `"inbox_storage": "firestore"`. The ingest call should show `"status": "completed"` and a short reply. The inbox call should list that message.
 
-The same inbox check through the helper:
+The same checks through the helper:
 
 ```powershell
 .\bayos.ps1 inbox
 .\bayos.ps1 send "text" --from prof-x-001
+.\bayos.ps1 post --title "Four walls" --body "Food, shelter, utilities, and auto are funded." --from tally-001 --priority high --tag four-walls
+.\bayos.ps1 read <id>
 ```
+
+`bayos inbox` lists unread items. `bayos inbox --all` lists recent items including ones already marked read. `bayos post` stores a note and does not call Gemini. `bayos read` marks one id read.
 
 `--from` is the agent id. `prof-x-001` is the default. Other ids, such as `pony-001` or `chronos-001`, are listed in `CLAUDE.md`.
 
-## Inbox memory
+## Inbox
 
-`GET /api/v1/inbox` (what `bayos inbox` calls) lists recent tasks stored in the running instance's memory. With minimum instances set to 0, Google stops that instance after it has been idle. The next call starts a fresh instance and the list is empty. That is expected with this deploy.
+`deploy.ps1` stores inbox items in Cloud Firestore Native mode, collection `inbox`. They stay when Cloud Run scales to zero. `/health` reports `"inbox_storage": "firestore"` when that store is reachable. If it is not, the gateway uses the instance memory and reports `"inbox_storage": "memory"`.
 
-A cheap way to keep the list is Cloud Firestore in Native mode. The free tier is enough for a personal hub. It is not built yet. When you want it:
+`POST /api/v1/task/ingest` still calls Gemini, then stores the task and the reply. `POST /api/v1/inbox` stores a note and does not call Gemini.
 
-1. Enable `firestore.googleapis.com` and create a Native-mode database in the same project.
-2. Grant the Cloud Run service account the role **Cloud Datastore User** (`roles/datastore.user`).
-3. Change the gateway so each ingest writes a document in a collection named `inbox`, and `GET /api/v1/inbox` reads the newest documents from there.
+An agent posts a result with:
 
-Until that exists, treat the inbox as a live view of the current instance, not as a permanent archive.
+```powershell
+$headers = @{ "X-BayOS-Key" = $env:BAYOS_AUTH_KEY }
+$json = '{"agent":"tally-001","title":"Four walls","body":"Food, shelter, utilities, and auto are funded.","priority":"high","tags":["digest","four-walls"]}'
+$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+Invoke-RestMethod -Method Post -Uri "$env:BAYOS_URL/api/v1/inbox" -Headers $headers -ContentType "application/json" -Body $bytes
+```
+
+The same call with curl:
+
+```bash
+curl -sS -X POST "$BAYOS_URL/api/v1/inbox" \
+  -H "X-BayOS-Key: $BAYOS_AUTH_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"tally-001","title":"Four walls","body":"Food, shelter, utilities, and auto are funded.","priority":"high","tags":["digest","four-walls"]}'
+```
+
+A daily digest lists items newer than the last watermark. `since` is exclusive: an item received at that exact second is not returned again. `unread=true` skips items already marked read.
+
+```bash
+curl -sS "$BAYOS_URL/api/v1/inbox?unread=true&since=2026-10-11T00:00:00Z&agent=tally-001" \
+  -H "X-BayOS-Key: $BAYOS_AUTH_KEY"
+```
+
+Mark one item read:
+
+```bash
+curl -sS -X POST "$BAYOS_URL/api/v1/inbox/ITEM_ID/read" \
+  -H "X-BayOS-Key: $BAYOS_AUTH_KEY"
+```
+
+`priority` is `low`, `normal`, or `high`. `tags` is a list of up to 10 short strings. `agent` must be one of the registered agent ids.
 
 ## If something fails
 
@@ -206,4 +244,5 @@ Until that exists, treat the inbox as a live view of the current instance, not a
 | Permission denied on the first deploy | Wait two minutes and run `.\deploy.ps1` again. |
 | Ingest returns permission denied, `403`, or a Vertex AI error | Wait two minutes so `roles/aiplatform.user` can spread, then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. Billing must be on for this project. |
 | Ingest still mentions `ACCESS_TOKEN_TYPE_UNSUPPORTED` | That is the old Generative Language API key path. `/health` should say `"gemini_backend": "vertex"`. Pull the latest copy and run the deploy script again. |
-| Inbox is empty but you sent something earlier | The instance scaled to zero and the memory inbox was cleared. Send again and read the inbox while it is still warm. |
+| `/health` says `"inbox_storage": "memory"` | Firestore is not reachable yet. Wait two minutes and run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. Billing must be on. The script creates the Native database and grants `roles/datastore.user`. |
+| Inbox is empty but you sent something earlier | If `/health` says `firestore`, the item was marked read or the filter hid it. Run `.\bayos.ps1 inbox --all`. If `/health` says `memory`, that copy was cleared when the instance shut down. |

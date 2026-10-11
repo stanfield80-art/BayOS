@@ -5,9 +5,11 @@
 
   Signs in if needed, selects a project, enables APIs, stores
   BAYOS_AUTH_KEY in Secret Manager without echoing it, grants the
-  Cloud Run service account Vertex AI User, deploys from this folder,
-  then smoke-tests /health and ingest. Gemini is called with that
-  service account. No Gemini API key is required.
+  Cloud Run service account Vertex AI User and Cloud Datastore User,
+  creates a Native Firestore database when one is missing, deploys from
+  this folder, then smoke-tests /health, a direct inbox post, and ingest.
+  Gemini is called with that service account. No Gemini API key is required.
+  Inbox items are stored in Firestore collection inbox.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +24,7 @@ $MinInstances = "0"
 $MaxInstances = "1"
 $AuthSecretName = "bayos-auth-key"
 $VertexLocation = "global"
+$FirestoreLocation = "nam5"
 
 $script:GcloudExecutable = $null
 
@@ -211,6 +214,68 @@ function Save-SecretValue {
     }
 }
 
+function Get-FirestoreDatabase {
+    # (default) is the database id. Single quotes keep PowerShell from
+    # treating the parentheses as a subexpression.
+    $described = Invoke-GcloudNative -Quiet -ArgumentList @(
+        "firestore", "databases", "describe",
+        '--database=(default)',
+        "--format=json"
+    )
+    if ($described.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($described.Output)) {
+        return $null
+    }
+    $info = $described.Output | ConvertFrom-Json
+    $dbType = [string]$info.type
+    if ([string]::IsNullOrWhiteSpace($dbType)) {
+        $dbType = [string]$info.databaseType
+    }
+    $location = [string]$info.locationId
+    if ([string]::IsNullOrWhiteSpace($location)) {
+        $location = [string]$info.location
+    }
+    return [pscustomobject]@{
+        Type     = $dbType
+        Location = $location
+    }
+}
+
+function Ensure-FirestoreDatabase {
+    $existing = Get-FirestoreDatabase
+    if ($null -ne $existing) {
+        if ($existing.Type -and $existing.Type -notmatch 'NATIVE') {
+            throw "Firestore database '(default)' is type '$($existing.Type)' in '$($existing.Location)'. BayOS needs Native mode. Use a project whose default database is Native, then run .\deploy.ps1 again."
+        }
+        Write-Host "Firestore database '(default)' already exists in $($existing.Location)."
+        return
+    }
+
+    Write-Host "Creating a Native Firestore database in $FirestoreLocation (United States, includes Iowa)."
+    $created = Invoke-GcloudNative -ArgumentList @(
+        "firestore", "databases", "create",
+        '--database=(default)',
+        "--location=$FirestoreLocation",
+        "--type=firestore-native",
+        "--edition=standard",
+        "--quiet"
+    )
+    if ($created.ExitCode -eq 0) {
+        Write-Host "Firestore database created."
+        return
+    }
+
+    Write-Host "Create did not succeed. Checking whether the database already exists."
+    Start-Sleep -Seconds 15
+    $existing = Get-FirestoreDatabase
+    if ($null -eq $existing) {
+        throw "Could not create the Firestore database. Turn on billing, then run .\deploy.ps1 again."
+    }
+    if ($existing.Type -and $existing.Type -notmatch 'NATIVE') {
+        throw "Firestore database '(default)' is type '$($existing.Type)' in '$($existing.Location)'. BayOS needs Native mode."
+    }
+    Write-Host "Firestore database '(default)' is present in $($existing.Location)."
+}
+
 function Invoke-GatewayRequest {
     param(
         [Parameter(Mandatory = $true)][string]$Method,
@@ -302,7 +367,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Step 3 of 6: turn on Cloud Run, Secret Manager, Artifact Registry, Cloud Build, and Vertex AI"
+    Write-Host "Step 3 of 6: turn on Cloud Run, Secret Manager, Artifact Registry, Cloud Build, Vertex AI, and Firestore"
     Write-Host "This can take a few minutes the first time."
     $null = Invoke-Gcloud -ArgumentList @(
         "services", "enable",
@@ -311,6 +376,7 @@ try {
         "artifactregistry.googleapis.com",
         "cloudbuild.googleapis.com",
         "aiplatform.googleapis.com",
+        "firestore.googleapis.com",
         "--quiet"
     )
 
@@ -327,7 +393,7 @@ try {
     Save-SecretValue -Name $AuthSecretName -Value $AuthKey
 
     Write-Host ""
-    Write-Host "Step 5 of 6: let Cloud Run call Vertex AI and read the gateway key"
+    Write-Host "Step 5 of 6: let Cloud Run call Vertex AI and Firestore, and read the gateway key"
     $projectInfo = Invoke-Gcloud -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
     $projectNumber = ""
     if ($projectInfo.Output) {
@@ -359,6 +425,14 @@ try {
         "--role", "roles/aiplatform.user",
         "--quiet"
     )
+    Write-Host "Granting Cloud Datastore User so the service account can read and write the inbox."
+    $null = Invoke-Gcloud -ArgumentList @(
+        "projects", "add-iam-policy-binding", $ProjectId,
+        "--member", "serviceAccount:$RuntimeSa",
+        "--role", "roles/datastore.user",
+        "--quiet"
+    )
+    Ensure-FirestoreDatabase
 
     Write-Host ""
     Write-Host "Step 6 of 6: deploy bayos-gateway from this folder"
@@ -394,30 +468,68 @@ try {
 
     Write-Host ""
     Write-Host "Smoke test: /health"
+    $headers = @{ "X-BayOS-Key" = $AuthKey }
     $health = $null
     $attempt = 0
     while ($attempt -lt 6) {
         $attempt++
         try {
             $health = Invoke-GatewayRequest -Method "Get" -Uri ($serviceUrl + "/health")
-            break
         } catch {
             if ($attempt -ge 6) {
                 throw
             }
             Write-Host "The service is still starting. Waiting 10 seconds..."
             Start-Sleep -Seconds 10
+            continue
         }
+        $backendReady = ($health.gemini_backend -eq "vertex" -and $health.gemini_location -eq "global" -and $health.inbox_storage -eq "firestore")
+        if ($backendReady) {
+            break
+        }
+        if ($attempt -ge 6) {
+            break
+        }
+        Write-Host "Waiting for Vertex and Firestore permissions to spread..."
+        Start-Sleep -Seconds 20
     }
-    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version) + ", gemini " + ($health.gemini_backend) + " " + ($health.gemini_location) + " " + ($health.gemini_model))
+    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version) + ", gemini " + ($health.gemini_backend) + " " + ($health.gemini_location) + " " + ($health.gemini_model) + ", inbox " + ($health.inbox_storage))
     if ($health.gemini_backend -ne "vertex" -or $health.gemini_location -ne "global") {
         throw "Health reported Gemini backend '$($health.gemini_backend)' at '$($health.gemini_location)'. Expected vertex at global. Pull the latest copy and run this script again."
     }
+    if ($health.inbox_storage -ne "firestore") {
+        throw "Health reported inbox_storage '$($health.inbox_storage)'. Expected firestore. Wait two minutes and run .\deploy.ps1 again so roles/datastore.user can spread."
+    }
+
+    Write-Host "Smoke test: store a note without calling Gemini, then mark it read"
+    $noteTitle = "Deploy smoke note"
+    $postJson = @{ agent = "tally-001"; title = $noteTitle; body = "Inbox stored without Gemini."; priority = "normal" } | ConvertTo-Json -Compress
+    $posted = Invoke-GatewayRequest -Method "Post" -Uri ($serviceUrl + "/api/v1/inbox") -Headers $headers -JsonBody $postJson
+    if ([string]::IsNullOrWhiteSpace([string]$posted.id)) {
+        throw "The inbox post did not return an id."
+    }
+    $unread = Invoke-GatewayRequest -Method "Get" -Uri ($serviceUrl + "/api/v1/inbox?unread=true&limit=20") -Headers $headers
+    if ($unread.storage -ne "firestore") {
+        throw "Inbox list reported storage '$($unread.storage)'. Expected firestore."
+    }
+    $sawNote = $false
+    foreach ($item in @($unread.items)) {
+        if ($null -ne $item -and [string]$item.id -eq [string]$posted.id) {
+            $sawNote = $true
+        }
+    }
+    if (-not $sawNote) {
+        throw "The posted note was not in the unread inbox."
+    }
+    $readItem = Invoke-GatewayRequest -Method "Post" -Uri ($serviceUrl + "/api/v1/inbox/" + $posted.id + "/read") -Headers $headers
+    if ($readItem.unread) {
+        throw "Marking the note read left it unread."
+    }
+    Write-Host ("Stored note " + $posted.id + " and marked it read.")
 
     Write-Host "Smoke test: authenticated ingest, then inbox"
     $marker = "Reply with the single word pong."
     $json = @{ task = $marker; agent = "prof-x-001" } | ConvertTo-Json -Compress
-    $headers = @{ "X-BayOS-Key" = $AuthKey }
     $ingest = $null
     $ingestAttempt = 0
     while ($ingestAttempt -lt 4) {
@@ -457,6 +569,8 @@ try {
     Write-Host '  $env:BAYOS_AUTH_KEY = "<the BayOS gateway key you just entered>"'
     Write-Host "  .\bayos.ps1 inbox"
     Write-Host '  .\bayos.ps1 send "text" --from prof-x-001'
+    Write-Host '  .\bayos.ps1 post --title "Four walls" --body "Food, shelter, utilities, and auto are funded." --from tally-001'
+    Write-Host "  .\bayos.ps1 read <id>"
     Write-Host ""
     Write-Host "The gateway key was not printed. Keep it in your password manager."
 } finally {
