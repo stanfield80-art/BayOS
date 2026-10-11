@@ -172,6 +172,46 @@ def gemini_model() -> str:
     return DEFAULT_GEMINI_MODEL
 
 
+_LOCATION_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
+
+
+def gemini_project() -> str:
+    return os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+
+
+def gemini_location() -> str:
+    """Vertex location. gemini-3.8-flash is on global, us, and eu, not us-central1."""
+    raw = (os.environ.get("GOOGLE_CLOUD_LOCATION") or "global").strip()
+    if _LOCATION_RE.match(raw):
+        return raw
+    return "global"
+
+
+def gemini_backend() -> str:
+    """Vertex ADC is the default. The API key is used only when asked for, or when no project is set and a key is present.
+
+    An explicit BAYOS_GEMINI_BACKEND=vertex never falls through to the API key.
+    A full AQ. key in x-goog-api-key still returns 401 ACCESS_TOKEN_TYPE_UNSUPPORTED
+    on generativelanguage.googleapis.com, including as ?key= and through this SDK.
+    """
+    raw = os.environ.get("BAYOS_GEMINI_BACKEND", "").strip().lower()
+    if raw in {"apikey", "api-key", "api_key"}:
+        return "apikey"
+    if raw in {"vertex", "adc"}:
+        return "vertex"
+    if gemini_project():
+        return "vertex"
+    if gemini_api_key():
+        return "apikey"
+    return "vertex"
+
+
+def gemini_ready() -> bool:
+    if gemini_backend() == "vertex":
+        return bool(gemini_project())
+    return bool(gemini_api_key())
+
+
 def _force_api_key_header(client: genai.Client, api_key: str) -> None:
     """Put the key in x-goog-api-key and drop any Authorization header.
 
@@ -199,47 +239,59 @@ def _force_api_key_header(client: genai.Client, api_key: str) -> None:
 _gemini_client_key: Optional[str] = None
 
 
-def get_gemini_client() -> genai.Client:
-    """Create a Gemini Developer API client for the configured key.
+def _client_cache_key() -> str:
+    if gemini_backend() == "vertex":
+        return f"vertex:{gemini_project()}:{gemini_location()}:{gemini_model()}"
+    return f"apikey:{gemini_api_key()}"
 
-    vertexai stays off so Cloud Run's service account is not used as an OAuth
-    bearer token. The key is passed explicitly so GOOGLE_API_KEY cannot replace
-    GEMINI_API_KEY.
+
+def get_gemini_client() -> genai.Client:
+    """Create the Gemini client for the selected backend.
+
+    Vertex uses Application Default Credentials on Cloud Run. The runtime
+    service account's OAuth token is sent to aiplatform.googleapis.com.
+    The API-key backend keeps AQ. and AIza values in x-goog-api-key only.
     """
     global _gemini_client, _gemini_client_key
-    key = gemini_api_key()
-    if _gemini_client is None or _gemini_client_key != key:
+    cache_key = _client_cache_key()
+    if _gemini_client is not None and _gemini_client_key == cache_key:
+        return _gemini_client
+    if gemini_backend() == "vertex":
+        client = genai.Client(
+            vertexai=True,
+            project=gemini_project(),
+            location=gemini_location(),
+            http_options={"api_version": "v1"},
+        )
+    else:
+        key = gemini_api_key()
         client = genai.Client(
             api_key=key,
             vertexai=False,
             http_options={"headers": {"x-goog-api-key": key}},
         )
         _force_api_key_header(client, key)
-        _gemini_client = client
-        _gemini_client_key = key
+    _gemini_client = client
+    _gemini_client_key = cache_key
     return _gemini_client
 
 
 def _inference_failure_detail(exc: Exception) -> str:
     text = str(exc)
     detail = f"Inference failure: {text}"
-    if "ACCESS_TOKEN_TYPE_UNSUPPORTED" in text or "UNAUTHENTICATED" in text:
-        key = gemini_api_key()
-        if key.startswith("AQ."):
-            kind = "AQ. auth key"
-        elif key.startswith("AIza"):
-            kind = "AIza standard key"
-        else:
-            kind = "key"
+    if gemini_backend() == "vertex":
         detail += (
-            f" The gateway sent the {kind} (length {len(key)}) in the x-goog-api-key header "
-            "to generativelanguage.googleapis.com/v1beta. Google checks that key before it looks at "
-            f"the model ({gemini_model()}). An AQ. auth key is bound to a service account in the key's "
-            "own project. The Cloud Run project does not have to be the same project, and this gateway "
-            "does not send an OAuth bearer token. Google returns this 401 when it cannot validate the "
-            "AQ. string, including when the copied value is incomplete. Re-copy the full key from AI Studio, "
-            "or paste an AIza key from Cloud Console Credentials that is restricted to the Generative Language API. "
-            "That API must be enabled in the key's project."
+            f" Vertex AI model {gemini_model()} at location {gemini_location()} "
+            f"in project {gemini_project() or '(unset)'}. "
+            "Enable aiplatform.googleapis.com and grant the Cloud Run service account roles/aiplatform.user. "
+            "gemini-3.8-flash is available on the global, us, and eu endpoints."
+        )
+        return detail
+    if "ACCESS_TOKEN_TYPE_UNSUPPORTED" in text or "UNAUTHENTICATED" in text:
+        detail += (
+            " The API-key path sent the key in x-goog-api-key to generativelanguage.googleapis.com. "
+            "AI Studio AQ. keys are currently rejected there. Deploy with Vertex AI instead "
+            "(BAYOS_GEMINI_BACKEND=vertex and GOOGLE_CLOUD_PROJECT set)."
         )
     return detail
 
@@ -338,7 +390,12 @@ async def run_inference(agent_id: str, system_instruction: str, task: str) -> st
                 "Use gemini, or stub for a local smoke test only."
             ),
         )
-    if not gemini_api_key():
+    if gemini_backend() == "vertex" and not gemini_project():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Vertex AI is not configured. Set GOOGLE_CLOUD_PROJECT, or set GEMINI_API_KEY and BAYOS_GEMINI_BACKEND=apikey.",
+        )
+    if gemini_backend() == "apikey" and not gemini_api_key():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GEMINI_API_KEY is not configured.",
@@ -371,7 +428,9 @@ async def health_check():
         "version": "2.4.0",
         "registered_agents": len(AGENT_PROMPTS),
         "auth_configured": bool(BAYOS_AUTH_KEY),
-        "gemini_configured": bool(gemini_api_key()),
+        "gemini_configured": gemini_ready(),
+        "gemini_backend": gemini_backend(),
+        "gemini_location": gemini_location() if gemini_backend() == "vertex" else "",
         "gemini_model": gemini_model(),
         "inference_mode": inference_mode(),
         "inbox_storage": "memory",

@@ -4,8 +4,10 @@
   Deploy the BayOS gateway to Google Cloud Run.
 
   Signs in if needed, selects a project, enables APIs, stores
-  BAYOS_AUTH_KEY and GEMINI_API_KEY in Secret Manager without echoing
-  them, deploys from this folder, then smoke-tests /health and ingest.
+  BAYOS_AUTH_KEY in Secret Manager without echoing it, grants the
+  Cloud Run service account Vertex AI User, deploys from this folder,
+  then smoke-tests /health and ingest. Gemini is called with that
+  service account. No Gemini API key is required.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -19,7 +21,7 @@ $ServiceName = "bayos-gateway"
 $MinInstances = "0"
 $MaxInstances = "1"
 $AuthSecretName = "bayos-auth-key"
-$GeminiSecretName = "gemini-api-key"
+$VertexLocation = "global"
 
 $script:GcloudExecutable = $null
 
@@ -243,7 +245,6 @@ function Invoke-GatewayRequest {
 if ($MyInvocation.InvocationName -ne '.') {
 
 $AuthKey = $null
-$GeminiKey = $null
 
 try {
     Set-Location -Path $PSScriptRoot
@@ -301,7 +302,7 @@ try {
     }
 
     Write-Host ""
-    Write-Host "Step 3 of 6: turn on Cloud Run, Secret Manager, Artifact Registry, and Cloud Build"
+    Write-Host "Step 3 of 6: turn on Cloud Run, Secret Manager, Artifact Registry, Cloud Build, and Vertex AI"
     Write-Host "This can take a few minutes the first time."
     $null = Invoke-Gcloud -ArgumentList @(
         "services", "enable",
@@ -309,31 +310,24 @@ try {
         "secretmanager.googleapis.com",
         "artifactregistry.googleapis.com",
         "cloudbuild.googleapis.com",
+        "aiplatform.googleapis.com",
         "--quiet"
     )
 
     Write-Host ""
-    Write-Host "Step 4 of 6: store the two keys in Secret Manager"
+    Write-Host "Step 4 of 6: store the BayOS gateway key in Secret Manager"
     Write-Host "What you paste is hidden. It is not printed, not put on the command line,"
     Write-Host "and not written into the container image."
+    Write-Host "Gemini does not use an API key. Cloud Run calls Vertex AI as this project's service account."
     $AuthKey = Read-HiddenValue -Prompt "BayOS gateway key (BAYOS_AUTH_KEY)"
     if ([string]::IsNullOrWhiteSpace($AuthKey)) {
         throw "The BayOS gateway key was empty."
     }
     $AuthKey = $AuthKey.Trim()
-    Write-Host "Paste the full Gemini key. AI Studio auth keys start with AQ. and belong to the AI Studio project."
-    Write-Host "That project does not have to be this Cloud Run project. Do not add quotes."
-    Write-Host "An AIza key from Cloud Console Credentials also works. Restrict it to the Generative Language API."
-    $GeminiKey = Read-HiddenValue -Prompt "Gemini API key (GEMINI_API_KEY)"
-    if ([string]::IsNullOrWhiteSpace($GeminiKey)) {
-        throw "The Gemini API key was empty."
-    }
-    $GeminiKey = $GeminiKey.Trim()
     Save-SecretValue -Name $AuthSecretName -Value $AuthKey
-    Save-SecretValue -Name $GeminiSecretName -Value $GeminiKey
 
     Write-Host ""
-    Write-Host "Step 5 of 6: let Cloud Run read those secrets"
+    Write-Host "Step 5 of 6: let Cloud Run call Vertex AI and read the gateway key"
     $projectInfo = Invoke-Gcloud -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
     $projectNumber = ""
     if ($projectInfo.Output) {
@@ -352,19 +346,25 @@ try {
         "--role", "roles/run.builder",
         "--quiet"
     )
-    foreach ($secretName in @($AuthSecretName, $GeminiSecretName)) {
-        $null = Invoke-Gcloud -ArgumentList @(
-            "secrets", "add-iam-policy-binding", $secretName,
-            "--member", "serviceAccount:$RuntimeSa",
-            "--role", "roles/secretmanager.secretAccessor",
-            "--quiet"
-        )
-    }
+    $null = Invoke-Gcloud -ArgumentList @(
+        "secrets", "add-iam-policy-binding", $AuthSecretName,
+        "--member", "serviceAccount:$RuntimeSa",
+        "--role", "roles/secretmanager.secretAccessor",
+        "--quiet"
+    )
+    Write-Host "Granting Vertex AI User so the service account can call Gemini."
+    $null = Invoke-Gcloud -ArgumentList @(
+        "projects", "add-iam-policy-binding", $ProjectId,
+        "--member", "serviceAccount:$RuntimeSa",
+        "--role", "roles/aiplatform.user",
+        "--quiet"
+    )
 
     Write-Host ""
     Write-Host "Step 6 of 6: deploy bayos-gateway from this folder"
     Write-Host "The first build often takes several minutes."
-    $setSecrets = "BAYOS_AUTH_KEY=${AuthSecretName}:latest,GEMINI_API_KEY=${GeminiSecretName}:latest"
+    $setSecrets = "BAYOS_AUTH_KEY=${AuthSecretName}:latest"
+    $setEnv = "GOOGLE_CLOUD_PROJECT=${ProjectId},GOOGLE_CLOUD_LOCATION=${VertexLocation},BAYOS_GEMINI_BACKEND=vertex"
     $null = Invoke-Gcloud -ArgumentList @(
         "run", "deploy", $ServiceName,
         "--source", ".",
@@ -376,6 +376,7 @@ try {
         "--allow-unauthenticated",
         "--service-account", $RuntimeSa,
         "--set-secrets", $setSecrets,
+        "--set-env-vars", $setEnv,
         "--quiet"
     )
 
@@ -408,13 +409,30 @@ try {
             Start-Sleep -Seconds 10
         }
     }
-    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version))
+    Write-Host ("Health: " + ($health.status) + ", version " + ($health.version) + ", gemini " + ($health.gemini_backend) + " " + ($health.gemini_location) + " " + ($health.gemini_model))
+    if ($health.gemini_backend -ne "vertex" -or $health.gemini_location -ne "global") {
+        throw "Health reported Gemini backend '$($health.gemini_backend)' at '$($health.gemini_location)'. Expected vertex at global. Pull the latest copy and run this script again."
+    }
 
     Write-Host "Smoke test: authenticated ingest, then inbox"
     $marker = "Reply with the single word pong."
     $json = @{ task = $marker; agent = "prof-x-001" } | ConvertTo-Json -Compress
     $headers = @{ "X-BayOS-Key" = $AuthKey }
-    $ingest = Invoke-GatewayRequest -Method "Post" -Uri ($serviceUrl + "/api/v1/task/ingest") -Headers $headers -JsonBody $json
+    $ingest = $null
+    $ingestAttempt = 0
+    while ($ingestAttempt -lt 4) {
+        $ingestAttempt++
+        try {
+            $ingest = Invoke-GatewayRequest -Method "Post" -Uri ($serviceUrl + "/api/v1/task/ingest") -Headers $headers -JsonBody $json
+            break
+        } catch {
+            if ($ingestAttempt -ge 4) {
+                throw
+            }
+            Write-Host "Vertex permission can take a minute to spread. Waiting 20 seconds..."
+            Start-Sleep -Seconds 20
+        }
+    }
     Write-Host ("Ingest status: " + $ingest.status)
     Write-Host ("Ingest output: " + $ingest.output)
 
@@ -443,7 +461,6 @@ try {
     Write-Host "The gateway key was not printed. Keep it in your password manager."
 } finally {
     $AuthKey = $null
-    $GeminiKey = $null
 }
 
 }

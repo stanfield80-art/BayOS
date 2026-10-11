@@ -2,7 +2,9 @@
 
 This puts the BayOS gateway on Google Cloud Run so it has a web address that stays deployed. You run everything from Windows PowerShell on your PC. Docker is not required. Google builds the container from the `Dockerfile` in this folder.
 
-The gateway checks a private key on every send and inbox call. That key, and the Gemini key, live in Google Secret Manager and are handed to Cloud Run as environment variables named `BAYOS_AUTH_KEY` and `GEMINI_API_KEY`. They are not written into the container image, and they are not stored in git. `.env` is listed in `.gitignore`.
+The gateway checks a private key on every send and inbox call. That key lives in Google Secret Manager and is handed to Cloud Run as `BAYOS_AUTH_KEY`. It is not written into the container image, and it is not stored in git. `.env` is listed in `.gitignore`.
+
+Gemini is called through Vertex AI as the Cloud Run service account. No Gemini API key is stored. AI Studio keys that start with `AQ.` are rejected by the Generative Language API with `401 ACCESS_TOKEN_TYPE_UNSUPPORTED` even when the full key is sent in `x-goog-api-key`.
 
 The service is deployed with a minimum of 0 instances in `us-central1` (Iowa). The address stays. When nobody is calling it, Google shuts the running copy down so you are not paying for an idle server. The first call after a quiet period can take several seconds while a new copy starts.
 
@@ -22,7 +24,7 @@ cd C:\Users\Joseph\path\to\BayOS
 .\deploy.ps1
 ```
 
-Change the `cd` path to the folder that contains `deploy.ps1`. The script signs you in, asks for the project id, turns the APIs on, asks for the two keys without showing them, deploys, then calls `/health` and an authenticated ingest.
+Change the `cd` path to the folder that contains `deploy.ps1`. The script signs you in, asks for the project id, turns the APIs on, asks for the BayOS gateway key without showing it, deploys, then calls `/health` and an authenticated ingest.
 
 When it finishes it prints a URL. In that same window, or a new one, run:
 
@@ -50,8 +52,7 @@ bayos send "text" --from prof-x-001
 2. A Cloud project you own. Create one at https://console.cloud.google.com/projectcreate if you do not have one. The project ID is the short name, such as `bayos-hub`, not the display name.
 3. Billing turned on for that project: https://console.cloud.google.com/billing . Cloud Run can sit at $0 while it is idle, but Google still requires a billing account before the first deploy.
 4. This BayOS folder on the PC (a git clone or a downloaded copy).
-5. A Gemini API key. AI Studio keys (https://aistudio.google.com/apikey) now start with `AQ.` and are bound to a service account in the AI Studio project. That project does not have to be the Cloud Run project. The Generative Language API has to be enabled in the key's project; AI Studio does this when it creates the key. An older `AIza` key from Cloud Console Credentials also works when it is restricted to the Generative Language API. Paste the whole value with no quotes. Both forms are sent in the `x-goog-api-key` header to `generativelanguage.googleapis.com/v1beta`. The default model is `gemini-3.8-flash`. Set `GEMINI_MODEL` only if you need a different current model, such as `gemini-3.5-flash-lite`.
-6. A long random string you invent as the BayOS gateway key. Keep it in a password manager. Anyone who has it can call the gateway.
+5. A long random string you invent as the BayOS gateway key. Keep it in a password manager. Anyone who has it can call the gateway. You do not need a Gemini API key.
 
 ## What `deploy.ps1` does
 
@@ -104,40 +105,41 @@ gcloud config set project YOUR_PROJECT_ID
 ### 6. Turn on the APIs
 
 ```powershell
-gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
+gcloud services enable run.googleapis.com secretmanager.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com aiplatform.googleapis.com
 ```
 
 - **Cloud Run** hosts the gateway.
-- **Secret Manager** holds the two keys.
+- **Secret Manager** holds the BayOS gateway key.
 - **Artifact Registry** stores the built container.
 - **Cloud Build** builds that container from this folder.
+- **Vertex AI** (`aiplatform.googleapis.com`) is how the service calls Gemini.
 
 The first time, this step can take a few minutes.
 
-### 7. Create the two secrets
+### 7. Create the gateway secret
 
-The script asks twice. Nothing you type is shown.
+The script asks once. Nothing you type is shown.
 
-- BayOS gateway key, stored as the secret `bayos-auth-key`, then exposed to the service as `BAYOS_AUTH_KEY`.
-- Gemini API key, stored as the secret `gemini-api-key`, then exposed as `GEMINI_API_KEY`.
+The BayOS gateway key is stored as the secret `bayos-auth-key`, then exposed to the service as `BAYOS_AUTH_KEY`.
 
-The values go to Secret Manager through a temporary file that the script deletes. They are not placed on the `gcloud` command line, where they would be visible in history. If you run `deploy.ps1` again and paste new values, a new secret version is added. Cloud Run uses the `latest` version.
+The value goes to Secret Manager through a temporary file that the script deletes. It is not placed on the `gcloud` command line, where it would be visible in history. If you run `deploy.ps1` again and paste a new value, a new secret version is added. Cloud Run uses the `latest` version.
 
 Do not put these keys in a `.env` file, the Dockerfile, or a command you copy into chat.
 
-### 8. Let Cloud Run read the secrets
+### 8. Let Cloud Run read the secret and call Vertex AI
 
-The script grants the project's Compute Engine service account two roles:
+The script grants the project's Compute Engine service account three roles:
 
 - `roles/run.builder`, so Cloud Build can build and deploy.
-- `roles/secretmanager.secretAccessor` on each secret, so the running service can read the keys.
+- `roles/secretmanager.secretAccessor` on `bayos-auth-key`, so the running service can read the gateway key.
+- `roles/aiplatform.user`, so that same service account can call Gemini on Vertex AI.
 
-The first grant can take a couple of minutes to spread. If the deploy then says permission denied, wait two minutes and run `.\deploy.ps1` again. Paste the same two keys when it asks. They are stored again as the latest secret version, and the deploy is retried.
+The first grant can take a couple of minutes to spread. If the deploy or the ingest smoke test says permission denied, wait two minutes and run `.\deploy.ps1` again. Paste the same gateway key when it asks.
 
 ### 9. Deploy
 
 ```powershell
-gcloud run deploy bayos-gateway --source . --region us-central1 --platform managed --min-instances 0 --max-instances 1 --memory 512Mi --allow-unauthenticated --service-account PROJECT_NUMBER-compute@developer.gserviceaccount.com --set-secrets BAYOS_AUTH_KEY=bayos-auth-key:latest,GEMINI_API_KEY=gemini-api-key:latest --quiet
+gcloud run deploy bayos-gateway --source . --region us-central1 --platform managed --min-instances 0 --max-instances 1 --memory 512Mi --allow-unauthenticated --service-account PROJECT_NUMBER-compute@developer.gserviceaccount.com --set-secrets BAYOS_AUTH_KEY=bayos-auth-key:latest --set-env-vars GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,GOOGLE_CLOUD_LOCATION=global,BAYOS_GEMINI_BACKEND=vertex --quiet
 ```
 
 - `--source .` uploads this folder and builds the `Dockerfile`. The upload skips `.env` and the vault folders.
@@ -145,9 +147,10 @@ gcloud run deploy bayos-gateway --source . --region us-central1 --platform manag
 - `--min-instances 0` shuts the copy down when it is idle. The URL stays.
 - `--max-instances 1` keeps a single copy, so the in-memory inbox is not split across two copies. It still clears when the copy shuts down. See below.
 - `--allow-unauthenticated` opens Google's front door so PowerShell can call the URL without a second Google login. Send and inbox still require the `X-BayOS-Key` header. `/health` is public and does not include the keys.
-- `--set-secrets` mounts the Secret Manager values as environment variables. They are not baked into the image.
+- `--set-secrets` mounts the gateway key as an environment variable. It is not baked into the image.
+- `--set-env-vars` points Gemini at Vertex AI in this project. `GOOGLE_CLOUD_LOCATION=global` is required for `gemini-3.8-flash`. That model is not served from `us-central1`. The Cloud Run service itself still runs in Iowa.
 
-Leave `BAYOS_INFERENCE_MODE` unset. The service then calls Gemini. The value `stub` skips Gemini and is only for a local test on a machine that does not have a Gemini key.
+Leave `BAYOS_INFERENCE_MODE` unset. The service then calls Vertex AI. The value `stub` skips Gemini and is only for a local test. Set `BAYOS_GEMINI_BACKEND=apikey` and `GEMINI_API_KEY` only if you intentionally want the old Generative Language API path.
 
 The first build often takes several minutes.
 
@@ -169,7 +172,7 @@ Invoke-RestMethod -Method Post -Uri "$env:BAYOS_URL/api/v1/task/ingest" -Headers
 Invoke-RestMethod -Uri "$env:BAYOS_URL/api/v1/inbox" -Headers $headers
 ```
 
-`/health` should show `"status": "healthy"` and `"version": "2.4.0"`. The ingest call should show `"status": "completed"` and a short reply. The inbox call should list that message.
+`/health` should show `"status": "healthy"`, `"gemini_backend": "vertex"`, `"gemini_location": "global"`, and `"gemini_model": "gemini-3.8-flash"`. The ingest call should show `"status": "completed"` and a short reply. The inbox call should list that message.
 
 The same inbox check through the helper:
 
@@ -201,5 +204,6 @@ Until that exists, treat the inbox as a live view of the current instance, not a
 | Scripts are disabled | Run the execution-policy command in the section above. |
 | Project not found, or billing | Create the project, turn on billing, then run `.\deploy.ps1` again. |
 | Permission denied on the first deploy | Wait two minutes and run `.\deploy.ps1` again. |
-| Ingest returns `401` or `ACCESS_TOKEN_TYPE_UNSUPPORTED` | Google rejected the Gemini key before it looked at the model. The gateway already sends it as `x-goog-api-key`. Re-copy the full `AQ.` key from AI Studio, or paste an `AIza` key that is restricted to the Generative Language API. Enable that API in the key's project, not only in the Cloud Run project. Then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. The script adds a new secret version. |
+| Ingest returns permission denied, `403`, or a Vertex AI error | Wait two minutes so `roles/aiplatform.user` can spread, then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. Billing must be on for this project. |
+| Ingest still mentions `ACCESS_TOKEN_TYPE_UNSUPPORTED` | That is the old Generative Language API key path. `/health` should say `"gemini_backend": "vertex"`. Pull the latest copy and run the deploy script again. |
 | Inbox is empty but you sent something earlier | The instance scaled to zero and the memory inbox was cleared. Send again and read the inbox while it is still warm. |
