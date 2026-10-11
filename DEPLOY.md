@@ -50,7 +50,7 @@ bayos send "text" --from prof-x-001
 2. A Cloud project you own. Create one at https://console.cloud.google.com/projectcreate if you do not have one. The project ID is the short name, such as `bayos-hub`, not the display name.
 3. Billing turned on for that project: https://console.cloud.google.com/billing . Cloud Run can sit at $0 while it is idle, but Google still requires a billing account before the first deploy.
 4. This BayOS folder on the PC (a git clone or a downloaded copy).
-5. A Gemini API key from https://aistudio.google.com/apikey . Keys created there now start with `AQ.` (an auth key). Older keys start with `AIza`. Paste the whole value with no quotes around it. Both forms are sent in the `x-goog-api-key` header.
+5. A Gemini API key. AI Studio keys (https://aistudio.google.com/apikey) now start with `AQ.` and are bound to a service account in the AI Studio project. That project does not have to be the Cloud Run project. The Generative Language API has to be enabled in the key's project; AI Studio does this when it creates the key. An older `AIza` key from Cloud Console Credentials also works when it is restricted to the Generative Language API. Paste the whole value with no quotes. Both forms are sent in the `x-goog-api-key` header to `generativelanguage.googleapis.com/v1beta`. The default model is `gemini-3.8-flash`. Set `GEMINI_MODEL` only if you need a different current model, such as `gemini-3.5-flash-lite`.
 6. A long random string you invent as the BayOS gateway key. Keep it in a password manager. Anyone who has it can call the gateway.
 
 ## What `deploy.ps1` does
@@ -201,5 +201,5 @@ Until that exists, treat the inbox as a live view of the current instance, not a
 | Scripts are disabled | Run the execution-policy command in the section above. |
 | Project not found, or billing | Create the project, turn on billing, then run `.\deploy.ps1` again. |
 | Permission denied on the first deploy | Wait two minutes and run `.\deploy.ps1` again. |
-| Ingest returns `401` or `ACCESS_TOKEN_TYPE_UNSUPPORTED` | The Gemini call is using the key from Secret Manager. Pull the latest copy, then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again and paste the full AI Studio key (`AQ.` or `AIza`) with no quotes. The script adds a new secret version. The gateway sends that value in the `x-goog-api-key` header. |
+| Ingest returns `401` or `ACCESS_TOKEN_TYPE_UNSUPPORTED` | Google rejected the Gemini key before it looked at the model. The gateway already sends it as `x-goog-api-key`. Re-copy the full `AQ.` key from AI Studio, or paste an `AIza` key that is restricted to the Generative Language API. Enable that API in the key's project, not only in the Cloud Run project. Then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. The script adds a new secret version. |
 | Inbox is empty but you sent something earlier | The instance scaled to zero and the memory inbox was cleared. Send again and read the inbox while it is still warm. |

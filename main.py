@@ -8,6 +8,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import time
 import uuid
 from collections import defaultdict, deque
@@ -156,6 +157,21 @@ def gemini_api_key() -> str:
     return normalize_gemini_api_key(os.environ.get("GEMINI_API_KEY"))
 
 
+# Current generateContent samples use gemini-3.8-flash on v1beta.
+# gemini-2.5-flash still exists, but Google limits it to projects that have
+# already used the 2.5 models. New projects are told to use 3.8 Flash or
+# 3.5 Flash-Lite. GEMINI_MODEL overrides the default.
+_GEMINI_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
+DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
+
+
+def gemini_model() -> str:
+    raw = (os.environ.get("GEMINI_MODEL") or DEFAULT_GEMINI_MODEL).strip()
+    if _GEMINI_MODEL_RE.match(raw):
+        return raw
+    return DEFAULT_GEMINI_MODEL
+
+
 def _force_api_key_header(client: genai.Client, api_key: str) -> None:
     """Put the key in x-goog-api-key and drop any Authorization header.
 
@@ -216,9 +232,14 @@ def _inference_failure_detail(exc: Exception) -> str:
         else:
             kind = "key"
         detail += (
-            f" The gateway sent the {kind} (length {len(key)}) in the x-goog-api-key header, "
-            "not as an OAuth bearer token. Google also returns this error when that value is "
-            "incomplete or still has quotes around it. Paste the full key from AI Studio with no quotes."
+            f" The gateway sent the {kind} (length {len(key)}) in the x-goog-api-key header "
+            "to generativelanguage.googleapis.com/v1beta. Google checks that key before it looks at "
+            f"the model ({gemini_model()}). An AQ. auth key is bound to a service account in the key's "
+            "own project. The Cloud Run project does not have to be the same project, and this gateway "
+            "does not send an OAuth bearer token. Google returns this 401 when it cannot validate the "
+            "AQ. string, including when the copied value is incomplete. Re-copy the full key from AI Studio, "
+            "or paste an AIza key from Cloud Console Credentials that is restricted to the Generative Language API. "
+            "That API must be enabled in the key's project."
         )
     return detail
 
@@ -327,7 +348,7 @@ async def run_inference(agent_id: str, system_instruction: str, task: str) -> st
     try:
         response = await asyncio.to_thread(
             client.models.generate_content,
-            model="gemini-2.5-flash",
+            model=gemini_model(),
             contents=task,
             config={"system_instruction": system_instruction},
         )
@@ -351,6 +372,7 @@ async def health_check():
         "registered_agents": len(AGENT_PROMPTS),
         "auth_configured": bool(BAYOS_AUTH_KEY),
         "gemini_configured": bool(gemini_api_key()),
+        "gemini_model": gemini_model(),
         "inference_mode": inference_mode(),
         "inbox_storage": "memory",
     }

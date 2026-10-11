@@ -321,7 +321,9 @@ try {
         throw "The BayOS gateway key was empty."
     }
     $AuthKey = $AuthKey.Trim()
-    Write-Host "Paste the full Gemini key from AI Studio. New keys start with AQ. Do not add quotes."
+    Write-Host "Paste the full Gemini key. AI Studio auth keys start with AQ. and belong to the AI Studio project."
+    Write-Host "That project does not have to be this Cloud Run project. Do not add quotes."
+    Write-Host "An AIza key from Cloud Console Credentials also works. Restrict it to the Generative Language API."
     $GeminiKey = Read-HiddenValue -Prompt "Gemini API key (GEMINI_API_KEY)"
     if ([string]::IsNullOrWhiteSpace($GeminiKey)) {
         throw "The Gemini API key was empty."
