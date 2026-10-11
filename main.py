@@ -137,12 +137,90 @@ def inference_mode() -> str:
     return os.environ.get("BAYOS_INFERENCE_MODE", "gemini").strip().lower() or "gemini"
 
 
+def normalize_gemini_api_key(raw: Optional[str]) -> str:
+    """Return the Gemini key with paste artifacts removed.
+
+    AI Studio auth keys start with AQ. Older standard keys start with AIza.
+    Both are API keys. A copied BOM, wrapping quotes, or a line break makes
+    Google reject the value as an unsupported access token.
+    """
+    if not raw:
+        return ""
+    key = raw.replace("\ufeff", "").strip()
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        key = key[1:-1].strip()
+    return "".join(key.split())
+
+
+def gemini_api_key() -> str:
+    return normalize_gemini_api_key(os.environ.get("GEMINI_API_KEY"))
+
+
+def _force_api_key_header(client: genai.Client, api_key: str) -> None:
+    """Put the key in x-goog-api-key and drop any Authorization header.
+
+    The Generative Language API expects that header for both AQ. and AIza keys.
+    Sending either value as Authorization: Bearer returns 401
+    ACCESS_TOKEN_TYPE_UNSUPPORTED on generateContent.
+    """
+
+    def wrap(send):
+        def wrapped(request, *args, **kwargs):
+            request.headers["x-goog-api-key"] = api_key
+            if "authorization" in request.headers:
+                del request.headers["authorization"]
+            return send(request, *args, **kwargs)
+
+        return wrapped
+
+    api_client = client._api_client
+    api_client._httpx_client.send = wrap(api_client._httpx_client.send)
+    async_client = getattr(api_client, "_async_httpx_client", None)
+    if async_client is not None:
+        async_client.send = wrap(async_client.send)
+
+
+_gemini_client_key: Optional[str] = None
+
+
 def get_gemini_client() -> genai.Client:
-    """Create the Gemini client on first use. The key comes from the environment."""
-    global _gemini_client
-    if _gemini_client is None:
-        _gemini_client = genai.Client()
+    """Create a Gemini Developer API client for the configured key.
+
+    vertexai stays off so Cloud Run's service account is not used as an OAuth
+    bearer token. The key is passed explicitly so GOOGLE_API_KEY cannot replace
+    GEMINI_API_KEY.
+    """
+    global _gemini_client, _gemini_client_key
+    key = gemini_api_key()
+    if _gemini_client is None or _gemini_client_key != key:
+        client = genai.Client(
+            api_key=key,
+            vertexai=False,
+            http_options={"headers": {"x-goog-api-key": key}},
+        )
+        _force_api_key_header(client, key)
+        _gemini_client = client
+        _gemini_client_key = key
     return _gemini_client
+
+
+def _inference_failure_detail(exc: Exception) -> str:
+    text = str(exc)
+    detail = f"Inference failure: {text}"
+    if "ACCESS_TOKEN_TYPE_UNSUPPORTED" in text or "UNAUTHENTICATED" in text:
+        key = gemini_api_key()
+        if key.startswith("AQ."):
+            kind = "AQ. auth key"
+        elif key.startswith("AIza"):
+            kind = "AIza standard key"
+        else:
+            kind = "key"
+        detail += (
+            f" The gateway sent the {kind} (length {len(key)}) in the x-goog-api-key header, "
+            "not as an OAuth bearer token. Google also returns this error when that value is "
+            "incomplete or still has quotes around it. Paste the full key from AI Studio with no quotes."
+        )
+    return detail
 
 
 # --- Application Setup ---
@@ -239,7 +317,7 @@ async def run_inference(agent_id: str, system_instruction: str, task: str) -> st
                 "Use gemini, or stub for a local smoke test only."
             ),
         )
-    if not os.environ.get("GEMINI_API_KEY"):
+    if not gemini_api_key():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="GEMINI_API_KEY is not configured.",
@@ -255,10 +333,10 @@ async def run_inference(agent_id: str, system_instruction: str, task: str) -> st
         )
         return response.text or ""
     except Exception as exc:
-        logger.error("Inference failure for agent %s: %s", agent_id, exc)
+        logger.error("Inference failure for agent %s: %s", agent_id, type(exc).__name__)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Inference failure: {exc}",
+            detail=_inference_failure_detail(exc),
         ) from exc
 
 
@@ -272,7 +350,7 @@ async def health_check():
         "version": "2.4.0",
         "registered_agents": len(AGENT_PROMPTS),
         "auth_configured": bool(BAYOS_AUTH_KEY),
-        "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+        "gemini_configured": bool(gemini_api_key()),
         "inference_mode": inference_mode(),
         "inbox_storage": "memory",
     }

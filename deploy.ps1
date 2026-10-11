@@ -321,6 +321,7 @@ try {
         throw "The BayOS gateway key was empty."
     }
     $AuthKey = $AuthKey.Trim()
+    Write-Host "Paste the full Gemini key from AI Studio. New keys start with AQ. Do not add quotes."
     $GeminiKey = Read-HiddenValue -Prompt "Gemini API key (GEMINI_API_KEY)"
     if ([string]::IsNullOrWhiteSpace($GeminiKey)) {
         throw "The Gemini API key was empty."

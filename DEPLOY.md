@@ -50,7 +50,7 @@ bayos send "text" --from prof-x-001
 2. A Cloud project you own. Create one at https://console.cloud.google.com/projectcreate if you do not have one. The project ID is the short name, such as `bayos-hub`, not the display name.
 3. Billing turned on for that project: https://console.cloud.google.com/billing . Cloud Run can sit at $0 while it is idle, but Google still requires a billing account before the first deploy.
 4. This BayOS folder on the PC (a git clone or a downloaded copy).
-5. A Gemini API key from https://aistudio.google.com/apikey .
+5. A Gemini API key from https://aistudio.google.com/apikey . Keys created there now start with `AQ.` (an auth key). Older keys start with `AIza`. Paste the whole value with no quotes around it. Both forms are sent in the `x-goog-api-key` header.
 6. A long random string you invent as the BayOS gateway key. Keep it in a password manager. Anyone who has it can call the gateway.
 
 ## What `deploy.ps1` does
@@ -201,5 +201,5 @@ Until that exists, treat the inbox as a live view of the current instance, not a
 | Scripts are disabled | Run the execution-policy command in the section above. |
 | Project not found, or billing | Create the project, turn on billing, then run `.\deploy.ps1` again. |
 | Permission denied on the first deploy | Wait two minutes and run `.\deploy.ps1` again. |
-| Ingest returns an error about the Gemini key | Run `.\deploy.ps1` again and paste the key from AI Studio. That adds a new secret version. |
+| Ingest returns `401` or `ACCESS_TOKEN_TYPE_UNSUPPORTED` | The Gemini call is using the key from Secret Manager. Pull the latest copy, then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again and paste the full AI Studio key (`AQ.` or `AIza`) with no quotes. The script adds a new secret version. The gateway sends that value in the `x-goog-api-key` header. |
 | Inbox is empty but you sent something earlier | The instance scaled to zero and the memory inbox was cleared. Send again and read the inbox while it is still warm. |
