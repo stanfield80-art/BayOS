@@ -197,6 +197,7 @@ Until that exists, treat the inbox as a live view of the current instance, not a
 | What you see | What to do |
 | --- | --- |
 | `gcloud` is not recognized | Close PowerShell, open a new window, and try again. |
+| `Invalid choice: 'secrets describe ...'` | Pull the latest copy of this folder, then run `powershell -ExecutionPolicy Bypass -File .\deploy.ps1` again. If the secrets already exist, the script adds a new version. |
 | Scripts are disabled | Run the execution-policy command in the section above. |
 | Project not found, or billing | Create the project, turn on billing, then run `.\deploy.ps1` again. |
 | Permission denied on the first deploy | Wait two minutes and run `.\deploy.ps1` again. |

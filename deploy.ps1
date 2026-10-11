@@ -21,12 +21,139 @@ $MaxInstances = "1"
 $AuthSecretName = "bayos-auth-key"
 $GeminiSecretName = "gemini-api-key"
 
-function Invoke-Gcloud {
-    param([Parameter(Mandatory = $true)][string[]]$GcloudArgs)
-    & gcloud @GcloudArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "This command failed: gcloud $($GcloudArgs -join ' ')"
+$script:GcloudExecutable = $null
+
+function Resolve-GcloudExecutable {
+    # Windows PowerShell resolves `gcloud` to gcloud.ps1. That shim builds
+    # $run_args_array and then runs `& "$exe_path" $run_args_array` without
+    # splatting. On Windows PowerShell 5.1 the array is joined into one
+    # string, so python sees a single invalid choice. gcloud.cmd skips the shim.
+    $cmd = Get-Command -Name "gcloud.cmd" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd -and $cmd.Source) {
+        return [string]$cmd.Source
     }
+
+    $found = Get-Command -Name "gcloud" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $found) {
+        return $null
+    }
+
+    $source = [string]$found.Source
+    if (-not $source -and $found.Path) {
+        $source = [string]$found.Path
+    }
+    if ($source -match '(?i)\.ps1$') {
+        $sibling = Join-Path (Split-Path -Parent $source) "gcloud.cmd"
+        if (Test-Path -LiteralPath $sibling) {
+            return (Resolve-Path -LiteralPath $sibling).Path
+        }
+        throw "Found gcloud.ps1 but not gcloud.cmd beside it. Reinstall the Google Cloud CLI, then open a new window."
+    }
+    return $source
+}
+
+function Initialize-GcloudExecutable {
+    if ($script:GcloudExecutable) {
+        return $script:GcloudExecutable
+    }
+    $script:GcloudExecutable = Resolve-GcloudExecutable
+    return $script:GcloudExecutable
+}
+
+function Invoke-GcloudNative {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [switch]$Quiet
+    )
+    if (-not (Initialize-GcloudExecutable)) {
+        throw "The Google Cloud CLI is not installed."
+    }
+
+    $previousEap = $ErrorActionPreference
+    # Stop would turn python.exe stderr into a terminating NativeCommandError
+    # before LASTEXITCODE can be read. Continue still shows real gcloud errors.
+    if ($Quiet) {
+        $ErrorActionPreference = "SilentlyContinue"
+    } else {
+        $ErrorActionPreference = "Continue"
+    }
+    $restoreNative = $false
+    $previousNative = $false
+    if (Test-Path -Path "variable:PSNativeCommandUseErrorActionPreference") {
+        $restoreNative = $true
+        $previousNative = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+
+    $code = 1
+    $captured = $null
+    try {
+        # Do not add a redirection operator on this call. On Windows PowerShell 5.1,
+        # redirection plus a splatted array collapses every argument into one string.
+        $captured = & $script:GcloudExecutable @ArgumentList
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEap
+        if ($restoreNative) {
+            $PSNativeCommandUseErrorActionPreference = $previousNative
+        }
+    }
+    if ($null -eq $code) {
+        $code = 1
+    }
+    $text = ""
+    if ($null -ne $captured) {
+        $text = (@($captured) | ForEach-Object { "$_" }) -join "`n"
+        $text = $text.Trim()
+    }
+    if (-not $Quiet -and $text) {
+        Write-Host $text
+    }
+    return [pscustomobject]@{
+        ExitCode = [int]$code
+        Output   = $text
+    }
+}
+
+function Test-GcloudSecretExists {
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if (-not (Initialize-GcloudExecutable)) {
+        throw "The Google Cloud CLI is not installed."
+    }
+    $previousEap = $ErrorActionPreference
+    # A missing secret writes ERROR to stderr. Under Stop, Windows PowerShell 5.1
+    # turns that into a terminating NativeCommandError. SilentlyContinue does not.
+    $ErrorActionPreference = "SilentlyContinue"
+    $restoreNative = $false
+    $previousNative = $false
+    if (Test-Path -Path "variable:PSNativeCommandUseErrorActionPreference") {
+        $restoreNative = $true
+        $previousNative = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $code = 1
+    try {
+        & $script:GcloudExecutable secrets describe $Name --format=json 2>$null | Out-Null
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousEap
+        if ($restoreNative) {
+            $PSNativeCommandUseErrorActionPreference = $previousNative
+        }
+    }
+    if ($null -eq $code) {
+        $code = 1
+    }
+    return ($code -eq 0)
+}
+
+function Invoke-Gcloud {
+    param([Parameter(Mandatory = $true)][string[]]$ArgumentList)
+    $result = Invoke-GcloudNative -ArgumentList $ArgumentList
+    if ($result.ExitCode -ne 0) {
+        throw "This command failed: gcloud $($ArgumentList -join ' ')"
+    }
+    return $result
 }
 
 function Read-HiddenValue {
@@ -45,26 +172,32 @@ function Save-SecretValue {
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$Value
     )
-    $path = Join-Path $env:TEMP ("bayos-" + [Guid]::NewGuid().ToString("n") + ".bin")
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("bayos-" + [Guid]::NewGuid().ToString("n") + ".bin")
     $utf8 = New-Object System.Text.UTF8Encoding $false
     try {
         [System.IO.File]::WriteAllText($path, $Value, $utf8)
-        & gcloud @("secrets", "describe", $Name, "--format=value(name)") 1>$null 2>$null
-        $exists = ($LASTEXITCODE -eq 0)
+        # Pass each argument separately. A splatted array plus 2>$null is what
+        # made Windows PowerShell 5.1 hand gcloud.ps1 one joined string.
+        $exists = Test-GcloudSecretExists -Name $Name
         if ($exists) {
             Write-Host "Secret $Name already exists. Adding a new version."
-            & gcloud @("secrets", "versions", "add", $Name, "--data-file", $path, "--quiet")
+            $null = Invoke-Gcloud -ArgumentList @(
+                "secrets", "versions", "add", $Name, "--data-file", $path, "--quiet"
+            )
         } else {
             Write-Host "Creating secret $Name."
-            & gcloud @(
+            $created = Invoke-GcloudNative -ArgumentList @(
                 "secrets", "create", $Name,
                 "--data-file", $path,
                 "--replication-policy", "automatic",
                 "--quiet"
             )
-        }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Could not store secret $Name in Secret Manager."
+            if ($created.ExitCode -ne 0) {
+                Write-Host "Create did not succeed. Adding a new version in case the secret already exists."
+                $null = Invoke-Gcloud -ArgumentList @(
+                    "secrets", "versions", "add", $Name, "--data-file", $path, "--quiet"
+                )
+            }
         }
         Write-Host "Stored secret $Name."
     } finally {
@@ -106,6 +239,9 @@ function Invoke-GatewayRequest {
     }
 }
 
+# Dot-sourcing loads the functions for tests. `powershell -File .\deploy.ps1` still runs the deploy.
+if ($MyInvocation.InvocationName -ne '.') {
+
 $AuthKey = $null
 $GeminiKey = $null
 
@@ -119,7 +255,7 @@ try {
         throw "Dockerfile was not found next to this script."
     }
 
-    $gcloudCmd = Get-Command gcloud -ErrorAction SilentlyContinue
+    $gcloudCmd = Resolve-GcloudExecutable
     if (-not $gcloudCmd) {
         Write-Host "The Google Cloud CLI is not installed, or this window was opened before it was installed."
         Write-Host "Install it with:"
@@ -137,16 +273,15 @@ try {
     Write-Host ""
 
     Write-Host "Step 1 of 6: sign in to Google Cloud"
-    $activeAccount = & gcloud auth list --filter="status:ACTIVE" --format="value(account)"
-    if ($LASTEXITCODE -ne 0) {
-        throw "gcloud auth list failed. Close this window, open a new one, and try again."
+    $authList = Invoke-Gcloud -ArgumentList @("auth", "list", "--filter=status:ACTIVE", "--format=json")
+    $activeAccount = ""
+    if ($authList.Output) {
+        $accounts = @($authList.Output | ConvertFrom-Json)
+        $activeAccount = ($accounts | ForEach-Object { [string]$_.account }) -join ", "
     }
     if ([string]::IsNullOrWhiteSpace($activeAccount)) {
         Write-Host "A browser window will open so you can sign in."
-        & gcloud auth login
-        if ($LASTEXITCODE -ne 0) {
-            throw "Sign-in did not finish."
-        }
+        $null = Invoke-Gcloud -ArgumentList @("auth", "login")
     } else {
         Write-Host "Already signed in as $activeAccount"
         Write-Host "To use a different Google account, press Ctrl+C and run: gcloud auth login"
@@ -159,16 +294,16 @@ try {
         throw "A project ID is required."
     }
     $ProjectId = $ProjectId.Trim()
-    Invoke-Gcloud @("config", "set", "project", $ProjectId)
-    & gcloud projects describe $ProjectId --format="value(projectId)" 1>$null
-    if ($LASTEXITCODE -ne 0) {
+    $null = Invoke-Gcloud -ArgumentList @("config", "set", "project", $ProjectId)
+    $projectCheck = Invoke-GcloudNative -Quiet -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
+    if ($projectCheck.ExitCode -ne 0) {
         throw "Project '$ProjectId' was not found. Create one at https://console.cloud.google.com/projectcreate and turn on billing, then run .\deploy.ps1 again."
     }
 
     Write-Host ""
     Write-Host "Step 3 of 6: turn on Cloud Run, Secret Manager, Artifact Registry, and Cloud Build"
     Write-Host "This can take a few minutes the first time."
-    Invoke-Gcloud @(
+    $null = Invoke-Gcloud -ArgumentList @(
         "services", "enable",
         "run.googleapis.com",
         "secretmanager.googleapis.com",
@@ -196,22 +331,26 @@ try {
 
     Write-Host ""
     Write-Host "Step 5 of 6: let Cloud Run read those secrets"
-    $projectNumber = & gcloud projects describe $ProjectId --format="value(projectNumber)"
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($projectNumber)) {
+    $projectInfo = Invoke-Gcloud -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
+    $projectNumber = ""
+    if ($projectInfo.Output) {
+        $projectNumber = [string]($projectInfo.Output | ConvertFrom-Json).projectNumber
+    }
+    if ([string]::IsNullOrWhiteSpace($projectNumber)) {
         throw "Could not read the project number for $ProjectId."
     }
-    $projectNumber = "$projectNumber".Trim()
+    $projectNumber = $projectNumber.Trim()
     $RuntimeSa = "$projectNumber-compute@developer.gserviceaccount.com"
     Write-Host "Service account: $RuntimeSa"
     Write-Host "Granting Cloud Run Builder so Cloud Build can deploy. The first grant can take a couple of minutes to spread."
-    Invoke-Gcloud @(
+    $null = Invoke-Gcloud -ArgumentList @(
         "projects", "add-iam-policy-binding", $ProjectId,
         "--member", "serviceAccount:$RuntimeSa",
         "--role", "roles/run.builder",
         "--quiet"
     )
     foreach ($secretName in @($AuthSecretName, $GeminiSecretName)) {
-        Invoke-Gcloud @(
+        $null = Invoke-Gcloud -ArgumentList @(
             "secrets", "add-iam-policy-binding", $secretName,
             "--member", "serviceAccount:$RuntimeSa",
             "--role", "roles/secretmanager.secretAccessor",
@@ -223,7 +362,7 @@ try {
     Write-Host "Step 6 of 6: deploy bayos-gateway from this folder"
     Write-Host "The first build often takes several minutes."
     $setSecrets = "BAYOS_AUTH_KEY=${AuthSecretName}:latest,GEMINI_API_KEY=${GeminiSecretName}:latest"
-    Invoke-Gcloud @(
+    $null = Invoke-Gcloud -ArgumentList @(
         "run", "deploy", $ServiceName,
         "--source", ".",
         "--region", $Region,
@@ -237,11 +376,17 @@ try {
         "--quiet"
     )
 
-    $serviceUrl = & gcloud run services describe $ServiceName --region $Region --format="value(status.url)"
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($serviceUrl)) {
+    $serviceInfo = Invoke-Gcloud -ArgumentList @(
+        "run", "services", "describe", $ServiceName, "--region", $Region, "--format=json"
+    )
+    $serviceUrl = ""
+    if ($serviceInfo.Output) {
+        $serviceUrl = [string]($serviceInfo.Output | ConvertFrom-Json).status.url
+    }
+    if ([string]::IsNullOrWhiteSpace($serviceUrl)) {
         throw "The deploy command finished, but the service URL could not be read."
     }
-    $serviceUrl = "$serviceUrl".Trim().TrimEnd("/")
+    $serviceUrl = $serviceUrl.Trim().TrimEnd("/")
 
     Write-Host ""
     Write-Host "Smoke test: /health"
@@ -296,4 +441,6 @@ try {
 } finally {
     $AuthKey = $null
     $GeminiKey = $null
+}
+
 }
