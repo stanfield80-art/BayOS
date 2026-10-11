@@ -1,0 +1,34 @@
+# Defense in depth: the Dockerfile copies only main.py and requirements.txt.
+# These rules still keep secrets out if that COPY list ever grows.
+
+.git
+.gitignore
+.gcloudignore
+.dockerignore
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+__pycache__
+*.pyc
+.venv
+venv
+.pytest_cache
+*.md
+*.ps1
+logo.svg
+00 Inbox
+01 Operating System
+02 Identity
+03 Current State
+04 Projects
+05 Clinical
+06 Research
+07 Resources
+08 Memory
+09 Templates
+10 Baymax

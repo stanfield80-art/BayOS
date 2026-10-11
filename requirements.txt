@@ -1,0 +1,6 @@
+# Direct dependencies, pinned. Installed when the Cloud Run image is built.
+# Do not put API keys or other secrets in this file.
+fastapi==0.143.0
+uvicorn==0.54.0
+google-genai==2.29.0
+pydantic==2.14.0
