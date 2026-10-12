@@ -3,25 +3,59 @@
 #include 'actions/calendar'
 #include 'actions/text'
 
-comment('BayOS Runner. No gateway key is stored in this shortcut. The first run asks for the gateway address and key and saves them in the Shortcuts folder file BayOS-Runner.txt. Delete that file to forget the key.')
+comment('BayOS Runner. No gateway key is stored in this shortcut. The first run asks for the gateway address and key and saves them as JSON in the Shortcuts folder file BayOS-Runner.txt. A missing or unreadable file is deleted and the shortcut asks again.')
 
+@configOk = ""
+@baseText = ""
+@keyText = ""
 @configFile = getFile('BayOS-Runner.txt', nil, false)
-if !@configFile {
+if @configFile {
+	@configRaw = getText(@configFile)
+	@configText = trimWhitespace(@configRaw)
+	if @configText beginsWith '{' {
+		if @configText contains '"url"' {
+			if @configText contains '"key"' {
+				if @configText endsWith '}' {
+					@configDict = getDictionary(@configText)
+					@loadedUrl = "{@configDict['url']}"
+					@loadedKey = "{@configDict['key']}"
+					@baseText = trimWhitespace(@loadedUrl)
+					@keyText = trimWhitespace(@loadedKey)
+					if @baseText beginsWith 'https://' {
+						if @keyText {
+							@configOk = "yes"
+						}
+					}
+				}
+			}
+		}
+	}
+}
+if !@configOk {
+	if @configFile {
+		deleteFiles(@configFile, true)
+	}
 	@baseInput = prompt('BayOS gateway address, including https:// and no trailing slash', 'URL')
 	@keyInput = prompt('BayOS gateway key')
-	@configText = "{@baseInput}\n{@keyInput}"
-	saveFile('BayOS-Runner.txt', @configText, true)
-} else {
-	@configText = getText(@configFile)
-}
-@lines = splitText(@configText, '\n')
-@base = getListItem(@lines, 1)
-@secret = getListItem(@lines, 2)
-@baseText = "{@base}"
-@keyText = "{@secret}"
-if !@keyText {
-	alert('The gateway key is missing. Delete BayOS-Runner.txt in the Shortcuts folder and run this shortcut again.')
-	stop()
+	@baseText = trimWhitespace("{@baseInput}")
+	@keyText = trimWhitespace("{@keyInput}")
+	if !@baseText {
+		alert('The gateway address is missing.')
+		stop()
+	}
+	if !@keyText {
+		alert('The gateway key is missing.')
+		stop()
+	}
+	if @baseText beginsWith 'https://' {
+		nothing()
+	} else {
+		alert('The gateway address must start with https://.')
+		stop()
+	}
+	@configDict = {"url": "{@baseText}", "key": "{@keyText}"}
+	@configBody = getText(@configDict)
+	saveFile('BayOS-Runner.txt', @configBody, true)
 }
 @wantedText = "{ShortcutInput}"
 if !@wantedText {

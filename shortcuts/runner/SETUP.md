@@ -12,7 +12,7 @@ A recipe stays a draft until you tap Approve on the tablet page. Posting a note,
 4. Run BayOS Runner once by hand.
 5. When it asks for the gateway address, paste the host from the deploy script, including `https://`, with no trailing slash. Example shape: `https://bayos-gateway-xxxxx.a.run.app`
 6. When it asks for the gateway key, paste the same key you use on the tablet page.
-7. The shortcut saves those two lines in the Shortcuts iCloud folder as `BayOS-Runner.txt`. That file is a secret. Anyone who can open that iCloud folder can read the key. Delete `BayOS-Runner.txt` and run the shortcut again to forget it.
+7. The shortcut saves a JSON object `{"url","key"}` in the Shortcuts iCloud folder as `BayOS-Runner.txt`. That file is a secret. Anyone who can open that iCloud folder can read the key. If the file is missing or is not that JSON, the shortcut deletes it and asks again. Delete `BayOS-Runner.txt` and run the shortcut again to forget the key. An older copy that stored the address and key on two lines is not valid. The next run deletes it and asks once more.
 
 Asking for the key on every run would be safer, and it would also stop the 9:00 AM automation, because nobody would be there to type it. The file is the choice that lets the morning run proceed.
 

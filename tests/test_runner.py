@@ -237,6 +237,11 @@ def test_tablet_review_and_public_shortcut():
     assert "unit-test-bayos-key" not in source
     assert "X-BayOS-Key" in source
     assert "BayOS-Runner.txt" in source
+    assert '{"url": "{@baseText}", "key": "{@keyText}"}' in source
+    assert 'deleteFiles' in source
+    assert 'getDictionary(@configText)' in source
+    assert 'splitText' not in source
+    assert 'getListItem(@lines' not in source
     assert 'beginsWith \'https://\'' in source or 'beginsWith "https://"' in source
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "bayos_oauth.py bayos_mcp.py bayos_runner.py ./" in dockerfile

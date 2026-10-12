@@ -331,7 +331,7 @@ The current arm is a plugin plus the MCP server at `https://YOUR-GATEWAY/mcp`. C
 
 ### BayOS Runner
 
-`shortcuts/runner/SETUP.md` is the iPhone install. The shortcut file is public and has no gateway key. The first run asks for the gateway address and key and saves them in the Shortcuts iCloud folder as `BayOS-Runner.txt`. Delete that file to forget the key.
+`shortcuts/runner/SETUP.md` is the iPhone install. The shortcut file is public and has no gateway key. The first run asks for the gateway address and key and saves them as JSON in the Shortcuts iCloud folder as `BayOS-Runner.txt`. A missing or unreadable file is deleted and the shortcut asks again. Delete that file to forget the key.
 
 On `/app`, tap **Recipes**, read the summary and the JSON, then tap **Approve**. A draft named `daily-health` is already there. It collects sleep hours, steps, resting heart rate, and blood oxygen minimum and average. It does not run until you approve it. Then add one personal automation per recipe: Time of Day, Run Shortcut **BayOS Runner**, input `daily-health`.
 
