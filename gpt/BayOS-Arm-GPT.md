@@ -1,5 +1,7 @@
 # BayOS Arm
 
+Deprecated. Custom GPTs retire on Dec 11, 2026, and custom Actions do not move to plugins. This file still describes the GPT Action that works until that date. The replacement is the plugin in `chatgpt-plugin/` and the MCP server at `/mcp`.
+
 Custom GPT that lists the BayOS inbox, posts a note, and marks a note read. The action schema is public. The gateway key is not.
 
 ## Name

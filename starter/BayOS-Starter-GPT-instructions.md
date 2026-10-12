@@ -1,5 +1,7 @@
 # BayOS Starter GPT
 
+Deprecated. Custom GPTs retire on Dec 11, 2026. Use `skills/bayos-starter/SKILL.md` in this folder as the plugin skill instead. The text below is the old GPT instructions and still works until that date.
+
 Generic instructions for one person's own assistant. Fill in the profile. Leave out anything they do not want stored in the GPT.
 
 ## Name

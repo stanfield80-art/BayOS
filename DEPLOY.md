@@ -311,7 +311,8 @@ These are extra doors on the same gateway. `/health` still returns only `status`
 After `deploy.ps1` prints `Deployed:`, it also prints:
 
 - Tablet: `https://YOUR-GATEWAY/app`
-- GPT action schema: `https://YOUR-GATEWAY/gpt/openapi.json`
+- GPT action schema (deprecated, works until Dec 11, 2026): `https://YOUR-GATEWAY/gpt/openapi.json`
+- ChatGPT MCP: `https://YOUR-GATEWAY/mcp`
 
 Replace `YOUR-GATEWAY` with the host the script printed. The hidden gateway-key prompt still strips control characters before the secret is stored. Paste the clean key from your password manager. A rerun adds a new secret version, and Cloud Run uses `latest`.
 
@@ -321,9 +322,11 @@ Open `/app` on the phone. Enter the gateway key once. It stays in that browser's
 
 The page is one HTML file from the gateway. It does not load a CDN. In Safari, use Share, then **Add to Home Screen**. The icon and manifest are `/app/icon-192.png`, `/app/icon-512.png`, and `/app/manifest.webmanifest`.
 
-### ChatGPT action
+### ChatGPT
 
-`gpt/BayOS-Arm-GPT.md` has the GPT name, description, instructions, conversation starters, and the GPT builder steps. Import `https://YOUR-GATEWAY/gpt/openapi.json`. Authentication is API Key, Auth Type Custom, header `X-BayOS-Key`. The schema describes only list inbox, post a note, and mark read. It does not describe health, calendar, or Firestore.
+The current arm is a plugin plus the MCP server at `https://YOUR-GATEWAY/mcp`. ChatGPT signs in with OAuth. The consent page asks for the BayOS gateway key. `chatgpt-plugin/SETUP.md` has the click steps. Notes posted from ChatGPT use agent `chatgpt-001`.
+
+`gpt/BayOS-Arm-GPT.md` and `https://YOUR-GATEWAY/gpt/openapi.json` are the old Custom GPT Action. That action still works until Dec 11, 2026. It does not transfer into the plugin. Authentication for that old action is API Key, Auth Type Custom, header `X-BayOS-Key`. The schema describes only list inbox, post a note, and mark read.
 
 ### Apple Health and RISE
 

@@ -6,6 +6,7 @@ Status: Production Hardened
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import re
@@ -20,10 +21,12 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security, s
 from fastapi.security import APIKeyHeader
 from google import genai
 from pydantic import BaseModel, Field
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 import bayos_calendar
+import bayos_mcp
+import bayos_oauth
 import bayos_public
 
 # --- Logging & Initialization ---
@@ -1195,3 +1198,148 @@ async def tablet_icon_192():
 @app.get("/app/icon-512.png", dependencies=[Depends(limit_request)])
 async def tablet_icon_512():
     return Response(content=bayos_public.ICON_512, media_type="image/png")
+
+
+def _oauth_params(source) -> Dict[str, str]:
+    names = (
+        "response_type",
+        "client_id",
+        "redirect_uri",
+        "state",
+        "code_challenge",
+        "code_challenge_method",
+        "scope",
+        "resource",
+    )
+    return {name: source.get(name, "") for name in names}
+
+
+def _bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if not header.lower().startswith("bearer "):
+        return ""
+    return header[7:].strip()
+
+
+@app.get("/.well-known/oauth-protected-resource", dependencies=[Depends(limit_request)])
+@app.get("/.well-known/oauth-protected-resource/mcp", dependencies=[Depends(limit_request)])
+async def oauth_protected_resource(request: Request):
+    return JSONResponse(bayos_oauth.protected_resource_metadata(_public_base(request)), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/.well-known/oauth-authorization-server", dependencies=[Depends(limit_request)])
+async def oauth_authorization_server(request: Request):
+    return JSONResponse(bayos_oauth.authorization_server_metadata(_public_base(request)), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/oauth/register", dependencies=[Depends(limit_request)])
+async def oauth_register(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+    try:
+        created = bayos_oauth.register_client(body)
+    except ValueError:
+        return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+    return JSONResponse(created, status_code=201, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/oauth/authorize", dependencies=[Depends(limit_request)])
+async def oauth_authorize_form(request: Request):
+    origin = _public_base(request)
+    params = _oauth_params(request.query_params)
+    error = bayos_oauth.validate_authorize(origin, params)
+    if error:
+        target = bayos_oauth.error_redirect(origin, params, error)
+        if target:
+            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+        return HTMLResponse("That authorization request was rejected.", status_code=400, headers={"Cache-Control": "no-store"})
+    page, headers = bayos_oauth.render_consent(params, "")
+    return HTMLResponse(page, headers=headers)
+
+
+@app.post("/oauth/authorize", dependencies=[Depends(limit_request)])
+async def oauth_authorize_submit(request: Request):
+    origin = _public_base(request)
+    try:
+        form = bayos_oauth.parse_form(await request.body())
+    except Exception:
+        return HTMLResponse("That authorization request was rejected.", status_code=400, headers={"Cache-Control": "no-store"})
+    params = _oauth_params(form)
+    error = bayos_oauth.validate_authorize(origin, params)
+    if error:
+        target = bayos_oauth.error_redirect(origin, params, error)
+        if target:
+            return RedirectResponse(target, status_code=302, headers={"Cache-Control": "no-store"})
+        return HTMLResponse("That authorization request was rejected.", status_code=400, headers={"Cache-Control": "no-store"})
+    if not bayos_oauth.keys_match(BAYOS_AUTH_KEY or "", form.get("gateway_key", "")):
+        page, headers = bayos_oauth.render_consent(params, "That gateway key was not accepted.")
+        return HTMLResponse(page, status_code=401, headers=headers)
+    code = bayos_oauth.issue_code(origin, params)
+    logger.info("OAuth code issued client=%s", params.get("client_id", "")[:12])
+    return RedirectResponse(bayos_oauth.authorization_redirect(origin, params, code), status_code=302, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/oauth/token", dependencies=[Depends(limit_request)])
+async def oauth_token(request: Request):
+    origin = _public_base(request)
+    if "application/x-www-form-urlencoded" not in request.headers.get("content-type", ""):
+        return JSONResponse({"error": "invalid_request"}, status_code=400, headers={"Cache-Control": "no-store"})
+    try:
+        form = bayos_oauth.parse_form(await request.body())
+    except Exception:
+        return JSONResponse({"error": "invalid_request"}, status_code=400, headers={"Cache-Control": "no-store"})
+    grant = form.get("grant_type", "")
+    try:
+        if grant == "authorization_code":
+            payload = bayos_oauth.exchange_code(origin, form)
+        elif grant == "refresh_token":
+            payload = bayos_oauth.exchange_refresh(origin, form)
+        else:
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400, headers={"Cache-Control": "no-store"})
+    except ValueError:
+        return JSONResponse({"error": "invalid_grant"}, status_code=400, headers={"Cache-Control": "no-store"})
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/mcp", dependencies=[Depends(limit_request)])
+async def mcp_post(request: Request):
+    origin = _public_base(request)
+    message = None
+    message_id = None
+    try:
+        parsed = json.loads((await request.body()).decode("utf-8"))
+        if isinstance(parsed, dict):
+            message = parsed
+            message_id = parsed.get("id")
+    except Exception:
+        message = None
+    token = _bearer_token(request)
+    if bayos_oauth.access_record(origin, token) is None:
+        return JSONResponse(
+            bayos_mcp.rpc_error(message_id, -32001, "Authorization is required."),
+            status_code=401,
+            headers={
+                "WWW-Authenticate": bayos_oauth.www_authenticate(origin),
+                "Cache-Control": "no-store",
+            },
+        )
+    if message is None:
+        return JSONResponse(bayos_mcp.rpc_error(None, -32700, "Parse error."), status_code=400)
+    result = await bayos_mcp.handle(message)
+    if result is None:
+        return Response(status_code=202)
+    accept = request.headers.get("accept", "")
+    if "application/json" not in accept and "text/event-stream" in accept:
+        payload = "event: message\ndata: " + json.dumps(result) + "\n\n"
+        return Response(content=payload, media_type="text/event-stream", headers={"Cache-Control": "no-store"})
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/mcp", dependencies=[Depends(limit_request)])
+@app.delete("/mcp", dependencies=[Depends(limit_request)])
+async def mcp_method_not_allowed():
+    return Response(status_code=405, headers={"Allow": "POST", "Cache-Control": "no-store"})

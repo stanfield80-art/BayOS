@@ -774,6 +774,7 @@ try {
     Write-Host "Deployed: $serviceUrl"
     Write-Host ("Tablet: " + $serviceUrl + "/app")
     Write-Host ("GPT action schema: " + $serviceUrl + "/gpt/openapi.json")
+    Write-Host ("ChatGPT MCP: " + $serviceUrl + "/mcp")
     Write-Host ""
     Write-Host "Use the hub from this window:"
     Write-Host ('  $env:BAYOS_URL = "' + $serviceUrl + '"')
