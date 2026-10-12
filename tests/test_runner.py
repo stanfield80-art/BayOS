@@ -243,6 +243,21 @@ def test_tablet_review_and_public_shortcut():
     assert 'splitText' not in source
     assert 'getListItem(@lines' not in source
     assert 'beginsWith \'https://\'' in source or 'beginsWith "https://"' in source
+    assert 'getText(@urlValue)' in source
+    assert 'getText(@keyValue)' in source
+    assert 'replaceText("/+$", "", @baseText, true, true)' in source
+    assert 'urlEncode(@wantedText)' in source
+    assert 'url(@menuUrlText)' in source
+    assert 'url(@recipeUrlText)' in source
+    assert 'url(@healthUrlText)' in source
+    assert 'url(@calendarUrlText)' in source
+    assert 'url(@resultsUrlText)' in source
+    assert 'url(@openTargetText)' in source
+    assert 'downloadURL("{@baseText}' not in source
+    assert 'jsonRequest("{@baseText}' not in source
+    assert '"WFURL": "${@healthUrl}"' in source
+    assert 'number(@sleepPlain)' in source
+    assert 'number(@stepPlain)' in source
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert "bayos_oauth.py bayos_mcp.py bayos_runner.py ./" in dockerfile
     assert "BayOS-Runner.shortcut ./shortcuts/runner/BayOS-Runner.shortcut" in dockerfile

@@ -17,10 +17,13 @@ if @configFile {
 			if @configText contains '"key"' {
 				if @configText endsWith '}' {
 					@configDict = getDictionary(@configText)
-					@loadedUrl = "{@configDict['url']}"
-					@loadedKey = "{@configDict['key']}"
+					@urlValue = @configDict['url']
+					@keyValue = @configDict['key']
+					@loadedUrl = getText(@urlValue)
+					@loadedKey = getText(@keyValue)
 					@baseText = trimWhitespace(@loadedUrl)
 					@keyText = trimWhitespace(@loadedKey)
+					@baseText = replaceText("/+$", "", @baseText, true, true)
 					if @baseText beginsWith 'https://' {
 						if @keyText {
 							@configOk = "yes"
@@ -37,8 +40,11 @@ if !@configOk {
 	}
 	@baseInput = prompt('BayOS gateway address, including https:// and no trailing slash', 'URL')
 	@keyInput = prompt('BayOS gateway key')
-	@baseText = trimWhitespace("{@baseInput}")
-	@keyText = trimWhitespace("{@keyInput}")
+	@baseTyped = getText(@baseInput)
+	@keyTyped = getText(@keyInput)
+	@baseText = trimWhitespace(@baseTyped)
+	@keyText = trimWhitespace(@keyTyped)
+	@baseText = replaceText("/+$", "", @baseText, true, true)
 	if !@baseText {
 		alert('The gateway address is missing.')
 		stop()
@@ -57,9 +63,18 @@ if !@configOk {
 	@configBody = getText(@configDict)
 	saveFile('BayOS-Runner.txt', @configBody, true)
 }
-@wantedText = "{ShortcutInput}"
+@basePlain = getText(@baseText)
+@keyPlain = getText(@keyText)
+@baseText = trimWhitespace(@basePlain)
+@keyText = trimWhitespace(@keyPlain)
+@baseText = replaceText("/+$", "", @baseText, true, true)
+@wantedRaw = "{ShortcutInput}"
+@wantedTyped = getText(@wantedRaw)
+@wantedText = trimWhitespace(@wantedTyped)
 if !@wantedText {
-	const menuFile = downloadURL("{@baseText}/api/v1/runner/recipes?status=approved", {"X-BayOS-Key": "{@keyText}"})
+	@menuUrlText = "{@baseText}/api/v1/runner/recipes?status=approved"
+	@menuUrl = url(@menuUrlText)
+	const menuFile = downloadURL(@menuUrl, {"X-BayOS-Key": "{@keyText}"})
 	const menuText = getText(menuFile)
 	const menuDict = getDictionary(menuText)
 	@menuRecipes = getValue(menuDict, 'recipes')
@@ -73,9 +88,13 @@ if !@wantedText {
 		getValue(item, "name")
 	}
 	@picked = chooseFromList(names, 'BayOS recipe')
-	@wantedText = "{@picked}"
+	@pickedText = getText(@picked)
+	@wantedText = trimWhitespace(@pickedText)
 }
-const recipeFile = downloadURL("{@baseText}/api/v1/runner/recipes?status=approved&name={@wantedText}", {"X-BayOS-Key": "{@keyText}"})
+@nameEncoded = urlEncode(@wantedText)
+@recipeUrlText = "{@baseText}/api/v1/runner/recipes?status=approved&name={@nameEncoded}"
+@recipeUrl = url(@recipeUrlText)
+const recipeFile = downloadURL(@recipeUrl, {"X-BayOS-Key": "{@keyText}"})
 const recipeText = getText(recipeFile)
 const recipeDict = getDictionary(recipeText)
 @recipes = getValue(recipeDict, 'recipes')
@@ -86,26 +105,36 @@ if recipeCount == 0 {
 }
 @recipeRaw = getListItem(@recipes, 1)
 @recipeObj = getDictionary(@recipeRaw)
-@statusText = "{@recipeObj['status']}"
+@statusValue = @recipeObj['status']
+@statusTyped = getText(@statusValue)
+@statusText = trimWhitespace(@statusTyped)
 if @statusText != 'approved' {
 	alert('That recipe is not approved.')
 	stop()
 }
-@hashText = "{@recipeObj['sha256']}"
+@hashValue = @recipeObj['sha256']
+@hashTyped = getText(@hashValue)
+@hashText = trimWhitespace(@hashTyped)
 if !@hashText {
 	alert('That recipe has no approval hash.')
 	stop()
 }
-@typeText = "{@recipeObj['type']}"
+@typeValue = @recipeObj['type']
+@typeTyped = getText(@typeValue)
+@typeText = trimWhitespace(@typeTyped)
 @params = @recipeObj['params']
-@recipeIdText = "{@recipeObj['id']}"
+@idValue = @recipeObj['id']
+@idTyped = getText(@idValue)
+@recipeIdText = trimWhitespace(@idTyped)
 @resultTitle = 'Runner'
 @resultBody = ''
 @useVault = false
 @handled = false
 
 if @typeText == 'health_daily' {
-	@fieldsText = "{@params['fields']}"
+	@fieldsRaw = "{@params['fields']}"
+	@fieldsTyped = getText(@fieldsRaw)
+	@fieldsText = trimWhitespace(@fieldsTyped)
 	@today = currentDate()
 	@dateText = formatDate(@today, 'Custom', 'yyyy-MM-dd')
 	@health = {"date": "{@dateText}"}
@@ -138,8 +167,9 @@ if @typeText == 'health_daily' {
 		nothing()
 	}
 	@sleepText = "{sleepStat}"
-	if @sleepText {
-		@sleepNumber = number(@sleepText)
+	@sleepPlain = getText(@sleepText)
+	if @sleepPlain {
+		@sleepNumber = number(@sleepPlain)
 		if @sleepNumber >= 1440 {
 			@sleepNumber = @sleepNumber / 3600
 		}
@@ -177,8 +207,10 @@ if @typeText == 'health_daily' {
 		nothing()
 	}
 	@stepText = "{stepStat}"
-	if @stepText {
-		@health = setValue(@health, 'steps', "{@stepText}")
+	@stepPlain = getText(@stepText)
+	if @stepPlain {
+		@stepNumber = number(@stepPlain)
+		@health = setValue(@health, 'steps', "{@stepNumber}")
 	}
 	const hrStat = if @fieldsText contains 'resting_hr' {
 		rawAction('is.workflow.actions.filter.health.quantity', {
@@ -209,8 +241,10 @@ if @typeText == 'health_daily' {
 		nothing()
 	}
 	@hrText = "{hrStat}"
-	if @hrText {
-		@health = setValue(@health, 'resting_hr', "{@hrText}")
+	@hrPlain = getText(@hrText)
+	if @hrPlain {
+		@hrNumber = number(@hrPlain)
+		@health = setValue(@health, 'resting_hr', "{@hrNumber}")
 	}
 	const spo2MinStat = if @fieldsText contains 'spo2_min' {
 		rawAction('is.workflow.actions.filter.health.quantity', {
@@ -241,8 +275,9 @@ if @typeText == 'health_daily' {
 		nothing()
 	}
 	@spo2MinText = "{spo2MinStat}"
-	if @spo2MinText {
-		@spo2MinNumber = number(@spo2MinText)
+	@spo2MinPlain = getText(@spo2MinText)
+	if @spo2MinPlain {
+		@spo2MinNumber = number(@spo2MinPlain)
 		if @spo2MinNumber <= 1 && @spo2MinNumber > 0 {
 			@spo2MinNumber = @spo2MinNumber * 100
 		}
@@ -277,33 +312,42 @@ if @typeText == 'health_daily' {
 		nothing()
 	}
 	@spo2AvgText = "{spo2AvgStat}"
-	if @spo2AvgText {
-		@spo2AvgNumber = number(@spo2AvgText)
+	@spo2AvgPlain = getText(@spo2AvgText)
+	if @spo2AvgPlain {
+		@spo2AvgNumber = number(@spo2AvgPlain)
 		if @spo2AvgNumber <= 1 && @spo2AvgNumber > 0 {
 			@spo2AvgNumber = @spo2AvgNumber * 100
 		}
 		@health = setValue(@health, 'spo2_avg', "{@spo2AvgNumber}")
 	}
 	if @fieldsText contains 'sleep_start' {
-		@sleepStart = prompt('Sleep start HH:mm')
+		@sleepStartRaw = prompt('Sleep start HH:mm')
+		@sleepStartTyped = getText(@sleepStartRaw)
+		@sleepStart = trimWhitespace(@sleepStartTyped)
 		if @sleepStart {
 			@health = setValue(@health, 'sleep_start', "{@sleepStart}")
 		}
 	}
 	if @fieldsText contains 'sleep_end' {
-		@sleepEnd = prompt('Sleep end HH:mm')
+		@sleepEndRaw = prompt('Sleep end HH:mm')
+		@sleepEndTyped = getText(@sleepEndRaw)
+		@sleepEnd = trimWhitespace(@sleepEndTyped)
 		if @sleepEnd {
 			@health = setValue(@health, 'sleep_end', "{@sleepEnd}")
 		}
 	}
 	if @fieldsText contains 'notes' {
-		@notes = prompt('Health notes')
+		@notesRaw = prompt('Health notes')
+		@notesTyped = getText(@notesRaw)
+		@notes = trimWhitespace(@notesTyped)
 		if @notes {
 			@health = setValue(@health, 'notes', "{@notes}")
 		}
 	}
+	@healthUrlText = "{@baseText}/api/v1/health/daily"
+	@healthUrl = url(@healthUrlText)
 	rawAction('is.workflow.actions.downloadurl', {
-		"WFURL": "{@baseText}/api/v1/health/daily",
+		"WFURL": "${@healthUrl}",
 		"WFHTTPMethod": "POST",
 		"WFHTTPBodyType": "JSON",
 		"WFJSONValues": "${@health}",
@@ -315,8 +359,13 @@ if @typeText == 'health_daily' {
 }
 
 if @typeText == 'calendar_read' {
-	@daysText = "{@params['days']}"
-	const calendarFile = downloadURL("{@baseText}/api/v1/calendar?days={@daysText}", {"X-BayOS-Key": "{@keyText}"})
+	@daysRaw = "{@params['days']}"
+	@daysTyped = getText(@daysRaw)
+	@daysText = trimWhitespace(@daysTyped)
+	@daysEncoded = urlEncode(@daysText)
+	@calendarUrlText = "{@baseText}/api/v1/calendar?days={@daysEncoded}"
+	@calendarUrl = url(@calendarUrlText)
+	const calendarFile = downloadURL(@calendarUrl, {"X-BayOS-Key": "{@keyText}"})
 	@calendarText = getText(calendarFile)
 	const calendarSize = count(@calendarText, 'Characters')
 	if calendarSize > 7000 {
@@ -329,13 +378,19 @@ if @typeText == 'calendar_read' {
 }
 
 if @typeText == 'post_note' {
-	@resultTitle = "{@params['title']}"
-	@resultBody = "{@params['body']}"
+	@titleRaw = "{@params['title']}"
+	@bodyRaw = "{@params['body']}"
+	@titleTyped = getText(@titleRaw)
+	@bodyTyped = getText(@bodyRaw)
+	@resultTitle = trimWhitespace(@titleTyped)
+	@resultBody = trimWhitespace(@bodyTyped)
 	@handled = true
 }
 
 if @typeText == 'notify' {
-	@noteText = "{@params['text']}"
+	@noteRaw = "{@params['text']}"
+	@noteTyped = getText(@noteRaw)
+	@noteText = trimWhitespace(@noteTyped)
 	showNotification(@noteText, 'BayOS')
 	@resultTitle = 'Notification'
 	@resultBody = "{@noteText}"
@@ -343,8 +398,12 @@ if @typeText == 'notify' {
 }
 
 if @typeText == 'reminder_add' {
-	@reminderTitle = "{@params['title']}"
-	@dueText = "{@params['due']}"
+	@reminderRaw = "{@params['title']}"
+	@dueRaw = "{@params['due']}"
+	@reminderTyped = getText(@reminderRaw)
+	@dueTyped = getText(@dueRaw)
+	@reminderTitle = trimWhitespace(@reminderTyped)
+	@dueText = trimWhitespace(@dueTyped)
 	@dueDate = date(@dueText)
 	rawAction('is.workflow.actions.addnewreminder', {
 		"WFCalendarItemTitle": "{@reminderTitle}",
@@ -356,10 +415,14 @@ if @typeText == 'reminder_add' {
 }
 
 if @typeText == 'open_url' {
-	@urlText = "{@params['url']}"
+	@openRaw = "{@params['url']}"
+	@openTyped = getText(@openRaw)
+	@urlText = trimWhitespace(@openTyped)
 	if @urlText beginsWith 'https://' {
 		confirm("Open this link?\n{@urlText}", 'BayOS Runner')
-		openURL(@urlText)
+		@openTargetText = "{@urlText}"
+		@openTarget = url(@openTargetText)
+		openURL(@openTarget)
 		waitToReturn()
 		@resultTitle = 'Opened link'
 		@resultBody = "{@urlText}"
@@ -371,8 +434,12 @@ if @typeText == 'open_url' {
 }
 
 if @typeText == 'save_vault_note' {
-	@resultTitle = "{@params['title']}"
-	@resultBody = "{@params['body']}"
+	@vaultTitleRaw = "{@params['title']}"
+	@vaultBodyRaw = "{@params['body']}"
+	@vaultTitleTyped = getText(@vaultTitleRaw)
+	@vaultBodyTyped = getText(@vaultBodyRaw)
+	@resultTitle = trimWhitespace(@vaultTitleTyped)
+	@resultBody = trimWhitespace(@vaultBodyTyped)
 	@useVault = true
 	@handled = true
 }
@@ -382,9 +449,11 @@ if !@handled {
 	stop()
 }
 
+@resultsUrlText = "{@baseText}/api/v1/runner/results"
+@resultsUrl = url(@resultsUrlText)
 if @useVault == true {
-	jsonRequest("{@baseText}/api/v1/runner/results", 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}", "tags": ["vault"]}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
+	jsonRequest(@resultsUrl, 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}", "tags": ["vault"]}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
 } else {
-	jsonRequest("{@baseText}/api/v1/runner/results", 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}"}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
+	jsonRequest(@resultsUrl, 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}"}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
 }
 showNotification("Posted {@wantedText}", 'BayOS Runner')
