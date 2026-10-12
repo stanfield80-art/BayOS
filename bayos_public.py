@@ -40,6 +40,7 @@ _PAGE = """<!DOCTYPE html>
   .error { color: #ffb4b4; }
   .tag { border-radius: 999px; }
   .tag.on { background: #1f6f6a; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0f1419; padding: 8px; border-radius: 8px; margin: 8px 0; }
 </style>
 </head>
 <body>
@@ -51,7 +52,7 @@ _PAGE = """<!DOCTYPE html>
 <script nonce="__NONCE__">
 (function () {
   var KEY_NAME = "bayosGatewayKey";
-  var state = { mode: "unread", tag: "", items: [] };
+  var state = { mode: "unread", tag: "", items: [], recipes: [] };
 
   function el(tag, text) {
     var node = document.createElement(tag);
@@ -262,6 +263,60 @@ _PAGE = """<!DOCTYPE html>
     root.appendChild(row);
   }
 
+  function recipeJson(recipe) {
+    return JSON.stringify({
+      id: recipe.id,
+      name: recipe.name,
+      version: recipe.version,
+      type: recipe.type,
+      params: recipe.params,
+      schedule_hint: recipe.schedule_hint,
+      status: recipe.status,
+      approved_at: recipe.approved_at || "",
+      sha256: recipe.sha256 || ""
+    }, null, 2);
+  }
+
+  function approveRecipe(id, button) {
+    button.disabled = true;
+    api("/api/v1/runner/recipes/" + encodeURIComponent(id) + "/approve", { method: "POST", headers: {} })
+      .then(function () { return load(); })
+      .catch(function (err) {
+        button.disabled = false;
+        showError(err.message);
+      });
+  }
+
+  function renderRecipes(root) {
+    root.appendChild(el("h2", "Recipes"));
+    root.appendChild(el("p", "Review the summary and the full JSON. Approve sends the gateway key from this page. Posting a note cannot approve a recipe."));
+    if (!state.recipes.length) {
+      root.appendChild(el("p", "No recipes."));
+      return;
+    }
+    state.recipes.forEach(function (recipe) {
+      var card = el("article");
+      card.className = "card";
+      card.appendChild(el("strong", recipe.name || "(no name)"));
+      var meta = el("p");
+      meta.className = "meta";
+      meta.textContent = [recipe.status || "", recipe.type || "", recipe.schedule_hint || ""].join("  ");
+      card.appendChild(meta);
+      card.appendChild(el("p", recipe.summary || ""));
+      var pre = el("pre");
+      pre.textContent = recipeJson(recipe);
+      card.appendChild(pre);
+      if (recipe.status === "draft") {
+        var button = el("button", "Approve");
+        button.type = "button";
+        button.className = "primary";
+        button.addEventListener("click", function () { approveRecipe(recipe.id, button); });
+        card.appendChild(button);
+      }
+      root.appendChild(card);
+    });
+  }
+
   function renderForm(root) {
     var form = el("form");
     form.appendChild(el("h2", "Post note"));
@@ -366,7 +421,7 @@ _PAGE = """<!DOCTYPE html>
     root.appendChild(note);
     var modes = el("div");
     modes.className = "row";
-    [["unread", "Unread"], ["all", "All"]].forEach(function (pair) {
+    [["unread", "Unread"], ["all", "All"], ["recipes", "Recipes"]].forEach(function (pair) {
       var button = el("button", pair[1]);
       button.type = "button";
       if (state.mode === pair[0]) {
@@ -379,6 +434,10 @@ _PAGE = """<!DOCTYPE html>
       modes.appendChild(button);
     });
     root.appendChild(modes);
+    if (state.mode === "recipes") {
+      renderRecipes(root);
+      return;
+    }
     renderTags(root);
     renderList(root);
     renderForm(root);
@@ -388,6 +447,15 @@ _PAGE = """<!DOCTYPE html>
     if (!key()) {
       paint();
       return Promise.resolve();
+    }
+    if (state.mode === "recipes") {
+      return api("/api/v1/runner/recipes", { method: "GET", headers: {} }).then(function (payload) {
+        state.recipes = payload.recipes || [];
+        paint();
+      }).catch(function (err) {
+        paint();
+        showError(err.message);
+      });
     }
     var path = "/api/v1/inbox?limit=100&order=desc";
     if (state.mode !== "all") {

@@ -19,7 +19,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
-COPY main.py bayos_public.py bayos_calendar.py bayos_oauth.py bayos_mcp.py ./
+COPY main.py bayos_public.py bayos_calendar.py bayos_oauth.py bayos_mcp.py bayos_runner.py ./
+COPY shortcuts/runner/BayOS-Runner.shortcut ./shortcuts/runner/BayOS-Runner.shortcut
 
 USER bayos
 

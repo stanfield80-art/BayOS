@@ -28,6 +28,7 @@ import bayos_calendar
 import bayos_mcp
 import bayos_oauth
 import bayos_public
+import bayos_runner
 
 # --- Logging & Initialization ---
 logging.basicConfig(level=logging.INFO)
@@ -823,6 +824,7 @@ class InboxStore:
 
 
 inbox_store = InboxStore()
+recipe_store = bayos_runner.RecipeStore()
 
 
 async def run_inference(agent_id: str, system_instruction: str, task: str) -> str:
@@ -1343,3 +1345,118 @@ async def mcp_post(request: Request):
 @app.delete("/mcp", dependencies=[Depends(limit_request)])
 async def mcp_method_not_allowed():
     return Response(status_code=405, headers={"Allow": "POST", "Cache-Control": "no-store"})
+
+
+def _recipe_body(request_body: bytes) -> Dict[str, Any]:
+    try:
+        payload = json.loads(request_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be a JSON object.")
+    return payload
+
+
+def _recipe_http(exc: bayos_runner.RecipeError) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+
+@app.get("/api/v1/runner/recipes", dependencies=PROTECTED, tags=["Runner"])
+async def list_runner_recipes(
+    status_filter: str = Query(default="", alias="status"),
+    name: str = Query(default=""),
+):
+    """Approved recipes for the Runner, or every status when status is omitted."""
+    try:
+        rows = recipe_store.list_recipes(status_filter, name)
+    except bayos_runner.RecipeError as exc:
+        raise _recipe_http(exc) from exc
+    return JSONResponse(
+        {"recipes": [bayos_runner.public_recipe(row) for row in rows]},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/v1/runner/recipes", dependencies=PROTECTED, tags=["Runner"])
+async def create_runner_recipe(request: Request):
+    """Create a draft recipe. This call cannot approve it."""
+    payload = _recipe_body(await request.body())
+    try:
+        record = recipe_store.create(payload)
+    except bayos_runner.RecipeError as exc:
+        code = status.HTTP_409_CONFLICT if "already exists" in str(exc) else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=str(exc)) from exc
+    logger.info("Recipe draft id=%s name=%s", record["id"], record["name"])
+    return JSONResponse(bayos_runner.public_recipe(record), status_code=201, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/v1/runner/recipes/{recipe_id}/approve", dependencies=PROTECTED, tags=["Runner"])
+async def approve_runner_recipe(recipe_id: str):
+    """Approve one draft. Inbox posts and MCP tools do not call this."""
+    try:
+        record = recipe_store.approve(recipe_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found.") from exc
+    except bayos_runner.RecipeError as exc:
+        raise _recipe_http(exc) from exc
+    logger.info("Recipe approved id=%s name=%s", record["id"], record["name"])
+    return JSONResponse(bayos_runner.public_recipe(record), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/v1/runner/results", dependencies=PROTECTED, tags=["Runner"])
+async def post_runner_result(request: Request):
+    """Store a Runner result as an inbox note from shortcut-001."""
+    payload = _recipe_body(await request.body())
+    try:
+        result = bayos_runner.validate_result(payload)
+    except bayos_runner.RecipeError as exc:
+        raise _recipe_http(exc) from exc
+    recipe = recipe_store.get(result["recipe_id"])
+    if recipe is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Recipe not found.")
+    if recipe["status"] != "approved":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That recipe is not approved.")
+    tags = list(result["tags"])
+    if recipe["type"] == "post_note" and not tags:
+        tags.extend(recipe["params"].get("tags") or [])
+    if recipe["type"] == "save_vault_note" and not any(tag.lower() == "vault" for tag in tags):
+        tags.append("vault")
+    if not any(tag.lower() == "runner" for tag in tags):
+        tags.append("runner")
+    tags = clean_tags(tags)
+    body = clip_text(result["body"], MAX_STORED_OUTPUT_CHARS)
+    title = clip_text(result["title"], MAX_TITLE_CHARS)
+    item = InboxItem(
+        id=uuid.uuid4().hex,
+        received_at=utc_now(),
+        agent="shortcut-001",
+        task=title,
+        status="stored",
+        output=body,
+        title=title,
+        body=body,
+        priority="normal",
+        tags=tags,
+        unread=True,
+        source="runner",
+    )
+    await inbox_store.save(item)
+    logger.info("Runner result id=%s recipe=%s", item.id, result["recipe_id"])
+    return present_item(item)
+
+
+@app.get("/shortcuts/BayOS-Runner.shortcut", dependencies=[Depends(limit_request)])
+async def runner_shortcut_file():
+    """Public signed shortcut. It contains no gateway key."""
+    path = bayos_runner.shortcut_path()
+    if not path.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="The Runner shortcut is not on this gateway.")
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": 'inline; filename="BayOS-Runner.shortcut"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

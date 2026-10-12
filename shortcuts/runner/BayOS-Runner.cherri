@@ -1,0 +1,356 @@
+#include 'actions/web'
+#include 'actions/documents'
+#include 'actions/calendar'
+#include 'actions/text'
+
+comment('BayOS Runner. No gateway key is stored in this shortcut. The first run asks for the gateway address and key and saves them in the Shortcuts folder file BayOS-Runner.txt. Delete that file to forget the key.')
+
+@configFile = getFile('BayOS-Runner.txt', nil, false)
+if !@configFile {
+	@baseInput = prompt('BayOS gateway address, including https:// and no trailing slash', 'URL')
+	@keyInput = prompt('BayOS gateway key')
+	@configText = "{@baseInput}\n{@keyInput}"
+	saveFile('BayOS-Runner.txt', @configText, true)
+} else {
+	@configText = getText(@configFile)
+}
+@lines = splitText(@configText, '\n')
+@base = getListItem(@lines, 1)
+@secret = getListItem(@lines, 2)
+@baseText = "{@base}"
+@keyText = "{@secret}"
+if !@keyText {
+	alert('The gateway key is missing. Delete BayOS-Runner.txt in the Shortcuts folder and run this shortcut again.')
+	stop()
+}
+@wantedText = "{ShortcutInput}"
+if !@wantedText {
+	const menuFile = downloadURL("{@baseText}/api/v1/runner/recipes?status=approved", {"X-BayOS-Key": "{@keyText}"})
+	const menuText = getText(menuFile)
+	const menuDict = getDictionary(menuText)
+	@menuRecipes = getValue(menuDict, 'recipes')
+	const menuCount = count(@menuRecipes)
+	if menuCount == 0 {
+		alert('No approved recipes. Approve one on the tablet page.')
+		stop()
+	}
+	const names = for recipe in @menuRecipes {
+		const item = getDictionary(@recipe)
+		getValue(item, "name")
+	}
+	@picked = chooseFromList(names, 'BayOS recipe')
+	@wantedText = "{@picked}"
+}
+const recipeFile = downloadURL("{@baseText}/api/v1/runner/recipes?status=approved&name={@wantedText}", {"X-BayOS-Key": "{@keyText}"})
+const recipeText = getText(recipeFile)
+const recipeDict = getDictionary(recipeText)
+@recipes = getValue(recipeDict, 'recipes')
+const recipeCount = count(@recipes)
+if recipeCount == 0 {
+	alert("No approved recipe named {@wantedText}.")
+	stop()
+}
+@recipeRaw = getListItem(@recipes, 1)
+@recipeObj = getDictionary(@recipeRaw)
+@statusText = "{@recipeObj['status']}"
+if @statusText != 'approved' {
+	alert('That recipe is not approved.')
+	stop()
+}
+@hashText = "{@recipeObj['sha256']}"
+if !@hashText {
+	alert('That recipe has no approval hash.')
+	stop()
+}
+@typeText = "{@recipeObj['type']}"
+@params = @recipeObj['params']
+@recipeIdText = "{@recipeObj['id']}"
+@resultTitle = 'Runner'
+@resultBody = ''
+@useVault = false
+@handled = false
+
+if @typeText == 'health_daily' {
+	@fieldsText = "{@params['fields']}"
+	@today = currentDate()
+	@dateText = formatDate(@today, 'Custom', 'yyyy-MM-dd')
+	@health = {"date": "{@dateText}"}
+	const sleepStat = if @fieldsText contains 'sleep_hours' {
+		rawAction('is.workflow.actions.filter.health.category', {
+			"WFCategorySampleType": "HKCategoryTypeIdentifierSleepAnalysis",
+			"WFContentItemLimitEnabled": true,
+			"WFContentItemLimitNumber": 20,
+			"WFContentItemFilter": {
+				"Value": {
+					"WFActionParameterFilterPrefix": 1,
+					"WFContentPredicateBoundedDate": false,
+					"WFActionParameterFilterTemplates": [
+						{
+							"Operator": 1002,
+							"Property": "Start Date",
+							"Removable": true,
+							"Values": {"Number": 1, "Unit": 16}
+						}
+					]
+				},
+				"WFSerializationType": "WFContentPredicateTableTemplate"
+			}
+		})
+		rawAction('is.workflow.actions.statistics', {
+			"WFStatisticsOperation": "Sum",
+			"WFContentItemPropertyName": "Duration"
+		})
+	} else {
+		nothing()
+	}
+	@sleepText = "{sleepStat}"
+	if @sleepText {
+		@sleepNumber = number(@sleepText)
+		if @sleepNumber >= 1440 {
+			@sleepNumber = @sleepNumber / 3600
+		}
+		if @sleepNumber > 24 && @sleepNumber < 1440 {
+			@sleepNumber = @sleepNumber / 60
+		}
+		@health = setValue(@health, 'sleep_hours', "{@sleepNumber}")
+	}
+	const stepStat = if @fieldsText contains 'steps' {
+		rawAction('is.workflow.actions.filter.health.quantity', {
+			"WFQuantitySampleType": "HKQuantityTypeIdentifierStepCount",
+			"WFContentItemLimitEnabled": true,
+			"WFContentItemLimitNumber": 50,
+			"WFContentItemFilter": {
+				"Value": {
+					"WFActionParameterFilterPrefix": 1,
+					"WFContentPredicateBoundedDate": false,
+					"WFActionParameterFilterTemplates": [
+						{
+							"Operator": 1002,
+							"Property": "Start Date",
+							"Removable": true,
+							"Values": {"Number": 1, "Unit": 16}
+						}
+					]
+				},
+				"WFSerializationType": "WFContentPredicateTableTemplate"
+			}
+		})
+		rawAction('is.workflow.actions.statistics', {
+			"WFStatisticsOperation": "Sum",
+			"WFContentItemPropertyName": "Value"
+		})
+	} else {
+		nothing()
+	}
+	@stepText = "{stepStat}"
+	if @stepText {
+		@health = setValue(@health, 'steps', "{@stepText}")
+	}
+	const hrStat = if @fieldsText contains 'resting_hr' {
+		rawAction('is.workflow.actions.filter.health.quantity', {
+			"WFQuantitySampleType": "HKQuantityTypeIdentifierRestingHeartRate",
+			"WFContentItemLimitEnabled": true,
+			"WFContentItemLimitNumber": 5,
+			"WFContentItemFilter": {
+				"Value": {
+					"WFActionParameterFilterPrefix": 1,
+					"WFContentPredicateBoundedDate": false,
+					"WFActionParameterFilterTemplates": [
+						{
+							"Operator": 1002,
+							"Property": "Start Date",
+							"Removable": true,
+							"Values": {"Number": 1, "Unit": 16}
+						}
+					]
+				},
+				"WFSerializationType": "WFContentPredicateTableTemplate"
+			}
+		})
+		rawAction('is.workflow.actions.statistics', {
+			"WFStatisticsOperation": "Average",
+			"WFContentItemPropertyName": "Value"
+		})
+	} else {
+		nothing()
+	}
+	@hrText = "{hrStat}"
+	if @hrText {
+		@health = setValue(@health, 'resting_hr', "{@hrText}")
+	}
+	const spo2MinStat = if @fieldsText contains 'spo2_min' {
+		rawAction('is.workflow.actions.filter.health.quantity', {
+			"WFQuantitySampleType": "HKQuantityTypeIdentifierOxygenSaturation",
+			"WFContentItemLimitEnabled": true,
+			"WFContentItemLimitNumber": 50,
+			"WFContentItemFilter": {
+				"Value": {
+					"WFActionParameterFilterPrefix": 1,
+					"WFContentPredicateBoundedDate": false,
+					"WFActionParameterFilterTemplates": [
+						{
+							"Operator": 1002,
+							"Property": "Start Date",
+							"Removable": true,
+							"Values": {"Number": 1, "Unit": 16}
+						}
+					]
+				},
+				"WFSerializationType": "WFContentPredicateTableTemplate"
+			}
+		})
+		rawAction('is.workflow.actions.statistics', {
+			"WFStatisticsOperation": "Minimum",
+			"WFContentItemPropertyName": "Value"
+		})
+	} else {
+		nothing()
+	}
+	@spo2MinText = "{spo2MinStat}"
+	if @spo2MinText {
+		@spo2MinNumber = number(@spo2MinText)
+		if @spo2MinNumber <= 1 && @spo2MinNumber > 0 {
+			@spo2MinNumber = @spo2MinNumber * 100
+		}
+		@health = setValue(@health, 'spo2_min', "{@spo2MinNumber}")
+	}
+	const spo2AvgStat = if @fieldsText contains 'spo2_avg' {
+		rawAction('is.workflow.actions.filter.health.quantity', {
+			"WFQuantitySampleType": "HKQuantityTypeIdentifierOxygenSaturation",
+			"WFContentItemLimitEnabled": true,
+			"WFContentItemLimitNumber": 50,
+			"WFContentItemFilter": {
+				"Value": {
+					"WFActionParameterFilterPrefix": 1,
+					"WFContentPredicateBoundedDate": false,
+					"WFActionParameterFilterTemplates": [
+						{
+							"Operator": 1002,
+							"Property": "Start Date",
+							"Removable": true,
+							"Values": {"Number": 1, "Unit": 16}
+						}
+					]
+				},
+				"WFSerializationType": "WFContentPredicateTableTemplate"
+			}
+		})
+		rawAction('is.workflow.actions.statistics', {
+			"WFStatisticsOperation": "Average",
+			"WFContentItemPropertyName": "Value"
+		})
+	} else {
+		nothing()
+	}
+	@spo2AvgText = "{spo2AvgStat}"
+	if @spo2AvgText {
+		@spo2AvgNumber = number(@spo2AvgText)
+		if @spo2AvgNumber <= 1 && @spo2AvgNumber > 0 {
+			@spo2AvgNumber = @spo2AvgNumber * 100
+		}
+		@health = setValue(@health, 'spo2_avg', "{@spo2AvgNumber}")
+	}
+	if @fieldsText contains 'sleep_start' {
+		@sleepStart = prompt('Sleep start HH:mm')
+		if @sleepStart {
+			@health = setValue(@health, 'sleep_start', "{@sleepStart}")
+		}
+	}
+	if @fieldsText contains 'sleep_end' {
+		@sleepEnd = prompt('Sleep end HH:mm')
+		if @sleepEnd {
+			@health = setValue(@health, 'sleep_end', "{@sleepEnd}")
+		}
+	}
+	if @fieldsText contains 'notes' {
+		@notes = prompt('Health notes')
+		if @notes {
+			@health = setValue(@health, 'notes', "{@notes}")
+		}
+	}
+	rawAction('is.workflow.actions.downloadurl', {
+		"WFURL": "{@baseText}/api/v1/health/daily",
+		"WFHTTPMethod": "POST",
+		"WFHTTPBodyType": "JSON",
+		"WFJSONValues": "${@health}",
+		"WFHTTPHeaders": {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"}
+	})
+	@resultTitle = "Daily health {@dateText}"
+	@resultBody = "Posted health fields to the hub."
+	@handled = true
+}
+
+if @typeText == 'calendar_read' {
+	@daysText = "{@params['days']}"
+	const calendarFile = downloadURL("{@baseText}/api/v1/calendar?days={@daysText}", {"X-BayOS-Key": "{@keyText}"})
+	@calendarText = getText(calendarFile)
+	const calendarSize = count(@calendarText, 'Characters')
+	if calendarSize > 7000 {
+		@resultBody = 'Calendar response was too long to store in full.'
+	} else {
+		@resultBody = "{@calendarText}"
+	}
+	@resultTitle = "Calendar {@daysText} days"
+	@handled = true
+}
+
+if @typeText == 'post_note' {
+	@resultTitle = "{@params['title']}"
+	@resultBody = "{@params['body']}"
+	@handled = true
+}
+
+if @typeText == 'notify' {
+	@noteText = "{@params['text']}"
+	showNotification(@noteText, 'BayOS')
+	@resultTitle = 'Notification'
+	@resultBody = "{@noteText}"
+	@handled = true
+}
+
+if @typeText == 'reminder_add' {
+	@reminderTitle = "{@params['title']}"
+	@dueText = "{@params['due']}"
+	@dueDate = date(@dueText)
+	rawAction('is.workflow.actions.addnewreminder', {
+		"WFCalendarItemTitle": "{@reminderTitle}",
+		"WFAlertCustomTime": "{@dueDate}"
+	})
+	@resultTitle = "{@reminderTitle}"
+	@resultBody = "Reminder due {@dueText}"
+	@handled = true
+}
+
+if @typeText == 'open_url' {
+	@urlText = "{@params['url']}"
+	if @urlText beginsWith 'https://' {
+		confirm("Open this link?\n{@urlText}", 'BayOS Runner')
+		openURL(@urlText)
+		waitToReturn()
+		@resultTitle = 'Opened link'
+		@resultBody = "{@urlText}"
+		@handled = true
+	} else {
+		alert('Only https links can be opened.')
+		stop()
+	}
+}
+
+if @typeText == 'save_vault_note' {
+	@resultTitle = "{@params['title']}"
+	@resultBody = "{@params['body']}"
+	@useVault = true
+	@handled = true
+}
+
+if !@handled {
+	alert("This Runner does not know recipe type {@typeText}.")
+	stop()
+}
+
+if @useVault == true {
+	jsonRequest("{@baseText}/api/v1/runner/results", 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}", "tags": ["vault"]}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
+} else {
+	jsonRequest("{@baseText}/api/v1/runner/results", 'POST', {"recipe_id": "{@recipeIdText}", "title": "{@resultTitle}", "body": "{@resultBody}"}, {"X-BayOS-Key": "{@keyText}", "Content-Type": "application/json"})
+}
+showNotification("Posted {@wantedText}", 'BayOS Runner')

@@ -315,7 +315,7 @@ def test_token_hashes_are_what_firestore_stores():
 def test_package_and_dockerfile():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
-    assert "bayos_oauth.py bayos_mcp.py ./" in dockerfile
+    assert "bayos_oauth.py bayos_mcp.py bayos_runner.py ./" in dockerfile
     plugin = (root / "chatgpt-plugin/plugin.json").read_text(encoding="utf-8")
     skill = (root / "chatgpt-plugin/skills/bayos-arm/SKILL.md").read_text(encoding="utf-8")
     assert '"name": "bayos-arm"' in plugin

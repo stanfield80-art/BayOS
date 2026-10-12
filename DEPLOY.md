@@ -313,6 +313,7 @@ After `deploy.ps1` prints `Deployed:`, it also prints:
 - Tablet: `https://YOUR-GATEWAY/app`
 - GPT action schema (deprecated, works until Dec 11, 2026): `https://YOUR-GATEWAY/gpt/openapi.json`
 - ChatGPT MCP: `https://YOUR-GATEWAY/mcp`
+- BayOS Runner shortcut: `https://YOUR-GATEWAY/shortcuts/BayOS-Runner.shortcut`
 
 Replace `YOUR-GATEWAY` with the host the script printed. The hidden gateway-key prompt still strips control characters before the secret is stored. Paste the clean key from your password manager. A rerun adds a new secret version, and Cloud Run uses `latest`.
 
@@ -327,6 +328,12 @@ The page is one HTML file from the gateway. It does not load a CDN. In Safari, u
 The current arm is a plugin plus the MCP server at `https://YOUR-GATEWAY/mcp`. ChatGPT signs in with OAuth. The consent page asks for the BayOS gateway key. `chatgpt-plugin/SETUP.md` has the click steps. Notes posted from ChatGPT use agent `chatgpt-001`.
 
 `gpt/BayOS-Arm-GPT.md` and `https://YOUR-GATEWAY/gpt/openapi.json` are the old Custom GPT Action. That action still works until Dec 11, 2026. It does not transfer into the plugin. Authentication for that old action is API Key, Auth Type Custom, header `X-BayOS-Key`. The schema describes only list inbox, post a note, and mark read.
+
+### BayOS Runner
+
+`shortcuts/runner/SETUP.md` is the iPhone install. The shortcut file is public and has no gateway key. The first run asks for the gateway address and key and saves them in the Shortcuts iCloud folder as `BayOS-Runner.txt`. Delete that file to forget the key.
+
+On `/app`, tap **Recipes**, read the summary and the JSON, then tap **Approve**. A draft named `daily-health` is already there. It collects sleep hours, steps, resting heart rate, and blood oxygen minimum and average. It does not run until you approve it. Then add one personal automation per recipe: Time of Day, Run Shortcut **BayOS Runner**, input `daily-health`.
 
 ### Apple Health and RISE
 
