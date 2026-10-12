@@ -618,7 +618,7 @@ function Update-BayosDailyIndex {
             }
             $label = $label.Replace("[", "(").Replace("]", ")")
             $agent = [string]$note.Agent
-            [void]$lines.Add("- [" + $label + "](" + $note.Link + ") — " + $agent)
+            [void]$lines.Add("- [" + $label + "](" + $note.Link + ") - " + $agent)
         }
         [void]$lines.Add("")
     }

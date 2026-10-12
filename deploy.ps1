@@ -165,15 +165,39 @@ function Invoke-Gcloud {
     return $result
 }
 
+function Remove-ControlCharacters {
+    # Same rule as bayos key-save. Pastes have included stray control characters.
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) {
+        return ""
+    }
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($ch in $Value.ToCharArray()) {
+        $category = [System.Globalization.CharUnicodeInfo]::GetUnicodeCategory($ch)
+        if ($category -eq [System.Globalization.UnicodeCategory]::Control) {
+            continue
+        }
+        if ($category -eq [System.Globalization.UnicodeCategory]::Format) {
+            continue
+        }
+        if ([int]$ch -eq 127) {
+            continue
+        }
+        [void]$builder.Append($ch)
+    }
+    return $builder.ToString().Trim()
+}
+
 function Read-HiddenValue {
     param([Parameter(Mandatory = $true)][string]$Prompt)
     $secure = Read-Host -AsSecureString -Prompt $Prompt
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
     try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
     } finally {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
+    return (Remove-ControlCharacters -Value $plain)
 }
 
 function Save-SecretValue {
@@ -488,6 +512,7 @@ try {
     Write-Host "Step 4 of 6: store the BayOS gateway key in Secret Manager"
     Write-Host "What you paste is hidden. It is not printed, not put on the command line,"
     Write-Host "and not written into the container image."
+    Write-Host "Stray control characters from a paste are removed before the secret is stored."
     Write-Host "Gemini does not use an API key. Cloud Run calls Vertex AI as this project's service account."
     $AuthKey = Read-HiddenValue -Prompt "BayOS gateway key (BAYOS_AUTH_KEY)"
     if ([string]::IsNullOrWhiteSpace($AuthKey)) {

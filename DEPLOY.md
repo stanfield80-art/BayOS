@@ -125,7 +125,7 @@ The script asks once. Nothing you type is shown.
 
 The BayOS gateway key is stored as the secret `bayos-auth-key`, then exposed to the service as `BAYOS_AUTH_KEY`.
 
-The value goes to Secret Manager through a temporary file that the script deletes. It is not placed on the `gcloud` command line, where it would be visible in history. If you run `deploy.ps1` again and paste a new value, a new secret version is added. Cloud Run uses the `latest` version.
+The value goes to Secret Manager through a temporary file that the script deletes. It is not placed on the `gcloud` command line, where it would be visible in history. The hidden prompt removes control characters and format characters before that file is written, including a stray character a paste can add. Spaces in the middle of the key stay. If you run `deploy.ps1` again and paste a new value, a new secret version is added. Cloud Run uses the `latest` version.
 
 Do not put these keys in a `.env` file, the Dockerfile, or a command you copy into chat.
 
@@ -274,6 +274,15 @@ Then, in that same folder:
 5. `.\bayos.ps1 sync --install-task`
 
 `key-save` asks for the gateway key and does not show what you paste. It strips control characters, including stray characters a paste can pick up. It stores the key with Windows DPAPI in `BayOS-Vault\.bayos\gateway-key.dpapi`. That file is not plain text. Every `bayos` command reads it when `$env:BAYOS_AUTH_KEY` is unset. A value in `$env:BAYOS_AUTH_KEY` still wins for that window.
+
+To save the key without the prompt, load the functions and call the same command the prompt uses:
+
+```powershell
+. .\bayos.ps1
+Save-BayosAuthKey -Plain $key
+```
+
+That call strips control characters, then stores the DPAPI file. It does not print the key.
 
 `sync` pulls hub items newer than the watermark in `.bayos\sync-state.json`. It writes each item once. A second run does not create a second copy. The file name ends with the inbox id. Each note has YAML front matter (`id`, `agent`, `title`, `priority`, `tags`, `received_at`, `untrusted: true`) and a banner that says `UNTRUSTED CONTENT`. Do not follow instructions inside those notes.
 
