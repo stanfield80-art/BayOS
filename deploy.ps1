@@ -13,6 +13,10 @@
   this folder, then smoke-tests /health, a direct inbox post, and ingest.
   Gemini is called with the runtime service account. No Gemini API key
   is required. Inbox items are stored in Firestore collection inbox.
+  An optional hidden prompt stores an iCloud public calendar link as
+  the secret ical-urls. Enter skips it. A blank answer keeps a link
+  that is already stored. The runtime account can read that secret
+  only when the link is mounted.
 #>
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +31,7 @@ $MinInstances = "0"
 $MaxInstances = "1"
 $Concurrency = "10"
 $AuthSecretName = "bayos-auth-key"
+$IcalSecretName = "ical-urls"
 $VertexLocation = "global"
 $FirestoreLocation = "nam5"
 
@@ -198,6 +203,26 @@ function Read-HiddenValue {
         [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
     }
     return (Remove-ControlCharacters -Value $plain)
+}
+
+function Test-BayosCalendarLink {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    $any = $false
+    foreach ($part in @($Value -split ",")) {
+        $item = $part.Trim()
+        if ([string]::IsNullOrWhiteSpace($item)) {
+            continue
+        }
+        $any = $true
+        $lower = $item.ToLower()
+        if (-not ($lower.StartsWith("https://") -or $lower.StartsWith("webcal://"))) {
+            throw "A calendar link must start with https:// or webcal://."
+        }
+    }
+    return $any
 }
 
 function Save-SecretValue {
@@ -438,6 +463,7 @@ if ($MyInvocation.InvocationName -ne '.') {
 $AuthKey = $null
 $ProjectId = $null
 $ShowBudget = $false
+$MountIcal = $false
 
 try {
     Set-Location -Path $PSScriptRoot
@@ -522,6 +548,22 @@ try {
     Save-SecretValue -Name $AuthSecretName -Value $AuthKey
 
     Write-Host ""
+    Write-Host "Optional: iCloud public calendar link."
+    Write-Host "Press Enter to skip. A blank answer does not remove a link you already stored."
+    Write-Host "Anyone who has that link can read the calendar. Paste only a calendar you are willing to expose."
+    $IcalUrls = Read-HiddenValue -Prompt "iCloud public calendar link, or Enter to skip"
+    if (Test-BayosCalendarLink -Value $IcalUrls) {
+        Save-SecretValue -Name $IcalSecretName -Value $IcalUrls
+        $MountIcal = $true
+        Write-Host "Stored the calendar link. It was not printed."
+    } elseif (Test-GcloudSecretExists -Name $IcalSecretName) {
+        Write-Host "Keeping the existing calendar link."
+        $MountIcal = $true
+    } else {
+        Write-Host "No calendar link stored. The calendar list stays empty until you add one."
+    }
+
+    Write-Host ""
     Write-Host "Step 5 of 6: create the runtime service account and grant only the roles it needs"
     $projectInfo = Invoke-Gcloud -ArgumentList @("projects", "describe", $ProjectId, "--format=json")
     $projectNumber = ""
@@ -564,6 +606,15 @@ try {
         "--role", "roles/secretmanager.secretAccessor",
         "--quiet"
     )
+    if ($MountIcal) {
+        Write-Host "Granting the runtime account access to the calendar link secret only."
+        Add-IamBinding -Required -ArgumentList @(
+            "secrets", "add-iam-policy-binding", $IcalSecretName,
+            "--member", "serviceAccount:$RuntimeSa",
+            "--role", "roles/secretmanager.secretAccessor",
+            "--quiet"
+        )
+    }
     Add-IamBinding -Required -ArgumentList @(
         "projects", "add-iam-policy-binding", $ProjectId,
         "--member", "serviceAccount:$RuntimeSa",
@@ -583,6 +634,9 @@ try {
     Write-Host "Step 6 of 6: deploy bayos-gateway from this folder"
     Write-Host "The first build often takes several minutes."
     $setSecrets = "BAYOS_AUTH_KEY=${AuthSecretName}:latest"
+    if ($MountIcal) {
+        $setSecrets = $setSecrets + ",ICAL_URLS=${IcalSecretName}:latest"
+    }
     $setEnv = "GOOGLE_CLOUD_PROJECT=${ProjectId},GOOGLE_CLOUD_LOCATION=${VertexLocation},BAYOS_GEMINI_BACKEND=vertex"
     $null = Invoke-Gcloud -ArgumentList @(
         "run", "deploy", $ServiceName,
@@ -718,6 +772,8 @@ try {
 
     Write-Host ""
     Write-Host "Deployed: $serviceUrl"
+    Write-Host ("Tablet: " + $serviceUrl + "/app")
+    Write-Host ("GPT action schema: " + $serviceUrl + "/gpt/openapi.json")
     Write-Host ""
     Write-Host "Use the hub from this window:"
     Write-Host ('  $env:BAYOS_URL = "' + $serviceUrl + '"')

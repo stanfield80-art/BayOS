@@ -71,6 +71,20 @@ Check -Name "deploy keeps inner space" -Ok ((Remove-ControlCharacters -Value "ab
 $reader = (Get-Command Read-HiddenValue).Definition
 Check -Name "hidden prompt strips" -Ok ($reader.Contains("Remove-ControlCharacters")) -Detail "Read-HiddenValue does not call Remove-ControlCharacters"
 
+$blankCalendar = Test-BayosCalendarLink -Value "   "
+Check -Name "blank calendar skipped" -Ok ($blankCalendar -eq $false) -Detail ([string]$blankCalendar)
+$httpsCalendar = Test-BayosCalendarLink -Value "https://example.com/cal"
+Check -Name "https calendar accepted" -Ok ($httpsCalendar -eq $true)
+$webcalCalendar = Test-BayosCalendarLink -Value "webcal://example.com/cal"
+Check -Name "webcal calendar accepted" -Ok ($webcalCalendar -eq $true)
+$httpMessage = ""
+try {
+    Test-BayosCalendarLink -Value "http://example.com/cal" | Out-Null
+} catch {
+    $httpMessage = $_.Exception.Message
+}
+Check -Name "http calendar rejected" -Ok ($httpMessage -match "https://") -Detail $httpMessage
+
 Write-Host ("FAILURES " + $failures.Count)
 if ($failures.Count -gt 0) {
     exit 1

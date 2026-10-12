@@ -133,7 +133,7 @@ Do not put these keys in a `.env` file, the Dockerfile, or a command you copy in
 
 The script creates `bayos-gateway@YOUR_PROJECT_ID.iam.gserviceaccount.com` when that account is missing. A second run finds it and does not create another. Cloud Run runs as this account. It receives only these roles:
 
-- `roles/secretmanager.secretAccessor` on the secret `bayos-auth-key`, so the running service can read the gateway key. It does not get that role on the whole project.
+- `roles/secretmanager.secretAccessor` on the secret `bayos-auth-key`, so the running service can read the gateway key. It does not get that role on the whole project. If you store an iCloud public calendar link, the same role is granted on the secret `ical-urls` only. A later run that leaves the calendar prompt blank keeps that secret and still mounts it.
 - `roles/aiplatform.user` on the project, so it can call Gemini on Vertex AI.
 - `roles/datastore.user` on the project, so it can read and write Firestore.
 
@@ -157,7 +157,7 @@ gcloud run deploy bayos-gateway --source . --region us-central1 --platform manag
 - `--max-instances 1` keeps a single copy. `--concurrency 10` caps how many requests that copy handles at once.
 - `--allow-unauthenticated` opens Google's front door so PowerShell can call the URL without a second Google login. Send and inbox still require the `X-BayOS-Key` header. `/health` is public and returns only status, version, and inbox storage.
 - `--service-account` is the dedicated runtime account from the step above.
-- `--set-secrets` mounts the gateway key as an environment variable. It is not baked into the image.
+- `--set-secrets` mounts the gateway key as an environment variable. It is not baked into the image. When a calendar link is stored, the flag is `BAYOS_AUTH_KEY=bayos-auth-key:latest,ICAL_URLS=ical-urls:latest`. Leaving the calendar prompt blank on a later run still includes that second secret when it already exists. `--set-secrets` replaces the whole set, so dropping `ICAL_URLS` would unmount the link.
 - `--set-env-vars` points Gemini at Vertex AI in this project. `GOOGLE_CLOUD_LOCATION=global` is required for `gemini-3.8-flash`. That model is not served from `us-central1`. The Cloud Run service itself still runs in Iowa. Vertex calls use a maximum of 1024 output tokens.
 
 Leave `BAYOS_INFERENCE_MODE` unset. The service then calls Vertex AI. The value `stub` skips Gemini and is only for a local test. Set `BAYOS_GEMINI_BACKEND=apikey` and `GEMINI_API_KEY` only if you intentionally want the old Generative Language API path. Leave `BAYOS_ENABLE_DOCS` unset. `/docs`, `/redoc`, and `/openapi.json` stay off unless that variable is `1`.
@@ -303,6 +303,47 @@ Notes land in a topic folder. A matching tag wins. Otherwise the agent id picks 
 `.\bayos.ps1 sync --install-task` registers a Windows scheduled task named `BayOS Sync`. It runs `bayos sync` every 15 minutes while you are logged on, as the same Windows user who saved the key. The key is not on the task command line. Add `--mark-read` to that command if the task should also mark items read: `.\bayos.ps1 sync --install-task --mark-read`. The first `sync` stores `BAYOS_URL` in the state file so the task can find the hub.
 
 `.\bayos.ps1 decide "Fund the four walls first." --to tally-001 --tag budget` posts Joseph's instruction to the hub as agent `joseph`, with tags `decision` and `tally-001`, plus any extra `--tag`. It also saves the note under `Decisions\`. Decisions are his own words, so that local file is `untrusted: false`. A copy that arrives through sync on another PC is still untrusted hub text.
+
+## Arms
+
+These are extra doors on the same gateway. `/health` still returns only `status`, `version`, and `inbox_storage`. A server error still returns `The gateway could not complete that request.` The interactive docs at `/docs` and `/openapi.json` stay off. The GPT schema below is a separate, hand-written file.
+
+After `deploy.ps1` prints `Deployed:`, it also prints:
+
+- Tablet: `https://YOUR-GATEWAY/app`
+- GPT action schema: `https://YOUR-GATEWAY/gpt/openapi.json`
+
+Replace `YOUR-GATEWAY` with the host the script printed. The hidden gateway-key prompt still strips control characters before the secret is stored. Paste the clean key from your password manager. A rerun adds a new secret version, and Cloud Run uses `latest`.
+
+### Tablet page
+
+Open `/app` on the phone. Enter the gateway key once. It stays in that browser's local storage. **Forget key** removes it. The page lists unread notes, or all notes, newest first, grouped by priority. Tag buttons filter that list. **Mark read** and **Post note** call the inbox. A note from this page uses agent `tablet-001` or `joseph`.
+
+The page is one HTML file from the gateway. It does not load a CDN. In Safari, use Share, then **Add to Home Screen**. The icon and manifest are `/app/icon-192.png`, `/app/icon-512.png`, and `/app/manifest.webmanifest`.
+
+### ChatGPT action
+
+`gpt/BayOS-Arm-GPT.md` has the GPT name, description, instructions, conversation starters, and the GPT builder steps. Import `https://YOUR-GATEWAY/gpt/openapi.json`. Authentication is API Key, Auth Type Custom, header `X-BayOS-Key`. The schema describes only list inbox, post a note, and mark read. It does not describe health, calendar, or Firestore.
+
+### Apple Health and RISE
+
+`POST /api/v1/health/daily` stores one day as an inbox note from `shortcut-001`, tags `health` and `sleep`, title `Daily health YYYY-MM-DD`. Priority is high when `spo2_min` is below 90 or `sleep_hours` is below 5. `shortcuts/Daily-Health-Shortcut.md` is the iPhone shortcut. RISE writes sleep into Apple Health. The shortcut reads Health, not RISE.
+
+### iCloud calendar
+
+`GET /api/v1/calendar?days=14` needs the gateway key. It returns upcoming events in `America/Chicago`. It does not return the calendar link.
+
+On the iPhone: open Calendar, tap **Calendars**, tap the **(i)** next to the calendar, turn on **Public Calendar**, then **Share Link**. Anyone who has that link can read the calendar. Use a calendar you are willing to expose, or skip the prompt.
+
+`deploy.ps1` asks for that link with a hidden prompt, strips control characters, and stores it as the secret `ical-urls`. Press Enter to skip. A blank answer does not delete a link you already stored. Several links can be comma-separated. Each one must start with `https://` or `webcal://`.
+
+### Gemini
+
+`gemini/BayOS-Gem.md` is the Gem text. A Gem cannot call this gateway. Paste the reply into the tablet page, or post it with a Shortcut as agent `gemini-001`.
+
+### A separate BayOS for someone else
+
+`starter/README.md` and `starter/BayOS-Starter-GPT-instructions.md` are a generic personal-OS prompt with a fill-in profile. They do not contain this vault. Another person deploys their own gateway with `deploy.ps1` on their own Google project if they want one. Their inbox is not this inbox.
 
 ## Budget alert
 

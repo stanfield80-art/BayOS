@@ -1,4 +1,4 @@
-# Defense in depth: the Dockerfile copies only main.py and requirements.txt.
+# Defense in depth: the Dockerfile copies the Python modules and requirements.txt.
 # These rules still keep secrets out if that COPY list ever grows.
 
 .git
