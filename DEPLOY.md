@@ -327,6 +327,8 @@ The page is one HTML file from the gateway. It does not load a CDN. In Safari, u
 
 The current arm is a plugin plus the MCP server at `https://YOUR-GATEWAY/mcp`. ChatGPT signs in with OAuth. The consent page asks for the BayOS gateway key. `chatgpt-plugin/SETUP.md` has the click steps. Notes posted from ChatGPT use agent `chatgpt-001`.
 
+Claude uses the same `/mcp` server. `claude/SETUP.md` has the click path. Choose **Register automatically**. A client whose registered name contains the word Claude posts as `claude-001`. Other names stay `chatgpt-001`, and the registered name is stored on the note.
+
 `gpt/BayOS-Arm-GPT.md` and `https://YOUR-GATEWAY/gpt/openapi.json` are the old Custom GPT Action. That action still works until Dec 11, 2026. It does not transfer into the plugin. Authentication for that old action is API Key, Auth Type Custom, header `X-BayOS-Key`. The schema describes only list inbox, post a note, and mark read.
 
 ### BayOS Runner

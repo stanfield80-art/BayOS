@@ -86,7 +86,7 @@ def test_gpt_schema():
 def test_agents_and_health_daily():
     reset()
     client = TestClient(main.app)
-    for agent in ("chatgpt-001", "gemini-001", "shortcut-001", "tablet-001", "joseph"):
+    for agent in ("chatgpt-001", "gemini-001", "shortcut-001", "tablet-001", "claude-001", "joseph"):
         posted = client.post(
             "/api/v1/inbox",
             headers=KEY,

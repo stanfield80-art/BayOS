@@ -1,9 +1,9 @@
-"""Single-user OAuth 2.1 authorization server for the ChatGPT MCP client.
+"""Single-user OAuth 2.1 authorization server for MCP clients.
 
-ChatGPT does not send a static API key to a remote MCP server. It uses the
-authorization-code flow with PKCE. This module issues opaque tokens after the
-operator types the BayOS gateway key on the consent page. Only hashes of codes
-and tokens are stored.
+ChatGPT and Claude custom connectors do not send a static API key. They use
+the authorization-code flow with PKCE and dynamic client registration. This
+module issues opaque tokens after the operator types the BayOS gateway key on
+the consent page. Only hashes of codes and tokens are stored.
 """
 
 import base64
@@ -21,6 +21,12 @@ ACCESS_TTL_SECONDS = 900
 REFRESH_TTL_SECONDS = 30 * 24 * 3600
 CODE_TTL_SECONDS = 60
 _CHALLENGE_CHARS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+# Hosted Claude apps. claude.ai is the fixed URI in Anthropic's connector docs.
+# claude.com is the second exact callback used by custom connectors.
+_CLAUDE_HOSTED_REDIRECTS = {
+    ("claude.ai", "/api/mcp/auth_callback"),
+    ("claude.com", "/api/mcp/auth_callback"),
+}
 
 
 def _hash(value: str) -> str:
@@ -71,11 +77,30 @@ def www_authenticate(origin: str) -> str:
     return f'Bearer resource_metadata="{quoted}", scope="{SCOPE}", error="invalid_token", error_description="Authorization is required."'
 
 
+def _hosted_claude_redirect(parsed) -> bool:
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or parsed.port not in (None, 443) or parsed.query:
+        return False
+    return (host, parsed.path) in _CLAUDE_HOSTED_REDIRECTS
+
+
+def _claude_code_loopback(parsed) -> bool:
+    """Claude Code's documented loopback: http://localhost[:port]/callback or 127.0.0.1."""
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "http" or host not in {"localhost", "127.0.0.1"}:
+        return False
+    if parsed.path != "/callback" or parsed.query:
+        return False
+    return True
+
+
 def redirect_allowed(uri: str) -> bool:
     parsed = urlsplit(uri)
     if parsed.username or parsed.password or parsed.fragment:
         return False
     host = (parsed.hostname or "").lower()
+    if _hosted_claude_redirect(parsed) or _claude_code_loopback(parsed):
+        return True
     if parsed.scheme == "https" and host == "chatgpt.com":
         if parsed.path == "/connector_platform_oauth_redirect":
             return True
@@ -383,6 +408,16 @@ def keys_match(expected: str, presented: str) -> bool:
     return hmac.compare_digest(presented, expected)
 
 
+def client_display_name(client_id: str) -> str:
+    client = store.get_client(client_id)
+    if not client:
+        return "This app"
+    name = client.get("client_name") or ""
+    if not isinstance(name, str) or not name.strip():
+        return "This app"
+    return name.strip()
+
+
 def consent_page(params: Dict[str, str], message: str, nonce: str) -> str:
     hidden = []
     for name in (
@@ -398,6 +433,15 @@ def consent_page(params: Dict[str, str], message: str, nonce: str) -> str:
         value = html.escape(params.get(name, ""), quote=True)
         hidden.append(f'<input type="hidden" name="{name}" value="{value}">')
     notice = f'<p class="error">{html.escape(message)}</p>' if message else ""
+    label = html.escape(client_display_name(params.get("client_id", "")), quote=True)
+    redirect = urlsplit(params.get("redirect_uri", ""))
+    host = html.escape(redirect.hostname or "unknown", quote=True)
+    loopback = (redirect.hostname or "").lower() in {"localhost", "127.0.0.1"}
+    local_note = (
+        "<p>This sign-in redirects to this computer. Allow it only if you started it.</p>"
+        if loopback
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -416,7 +460,9 @@ def consent_page(params: Dict[str, str], message: str, nonce: str) -> str:
 <body>
 <main>
   <h1>Connect BayOS</h1>
-  <p>ChatGPT is asking to read and write this gateway's inbox. Enter the BayOS gateway key to allow it. The key is checked on this server and is not sent to ChatGPT.</p>
+  <p>{label} is asking to read and write this gateway's inbox. Enter the BayOS gateway key to allow it. The key is checked on this server and is not sent to {label}.</p>
+  <p>Redirect host: {host}.</p>
+  {local_note}
   {notice}
   <form method="post" action="/oauth/authorize">
     {''.join(hidden)}

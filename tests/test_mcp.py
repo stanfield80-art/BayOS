@@ -34,13 +34,13 @@ def _pkce(verifier: str):
     return verifier, challenge
 
 
-def _token(redirect="http://127.0.0.1:9/callback"):
+def _token(redirect="http://127.0.0.1:9/callback", client_name="unit"):
     registered = client.post(
         "/oauth/register",
         json={
             "redirect_uris": [redirect],
             "token_endpoint_auth_method": "none",
-            "client_name": "unit",
+            "client_name": client_name,
         },
     )
     assert registered.status_code == 201, registered.text
@@ -61,6 +61,7 @@ def _token(redirect="http://127.0.0.1:9/callback"):
     assert form.status_code == 200, form.text
     assert "script" not in form.text.lower()
     assert "innerHTML" not in form.text
+    assert client_name + " is asking" in form.text
     submitted = client.post(
         "/oauth/authorize",
         data={**query, "gateway_key": os.environ["BAYOS_AUTH_KEY"]},
@@ -173,6 +174,7 @@ def test_mcp_tools_mark_inbox_untrusted():
     assert posted.status_code == 200, posted.text
     result = posted.json()["result"]
     assert result["structuredContent"]["item"]["agent"] == "chatgpt-001"
+    assert result["structuredContent"]["item"]["client_name"] == "unit"
     assert result["structuredContent"]["item"]["untrusted"] is True
     assert result["content"][0]["text"].startswith("UNTRUSTED INBOX DATA")
     assert "unit-test-bayos-key" not in posted.text
@@ -208,6 +210,134 @@ def test_mcp_tools_mark_inbox_untrusted():
         },
     )
     assert again.status_code == 400
+
+
+def _post_as(client_name, redirect):
+    tokens, _client_id = _token(redirect=redirect, client_name=client_name)
+    posted = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "post_note",
+                "arguments": {"title": "From " + client_name, "body": "Stored by the connector test."},
+            },
+        },
+        headers={"Authorization": "Bearer " + tokens["access_token"]},
+    )
+    assert posted.status_code == 200, posted.text
+    return posted.json()["result"]["structuredContent"]["item"]
+
+
+def test_claude_redirects_and_agent():
+    main.rate_limiter.hits.clear()
+    metadata = client.get("/.well-known/oauth-authorization-server")
+    body = metadata.json()
+    assert body["code_challenge_methods_supported"] == ["S256"]
+    assert body["registration_endpoint"].endswith("/oauth/register")
+    assert body["token_endpoint_auth_methods_supported"] == ["none"]
+    assert "client_id_metadata_document_supported" not in body
+    previous = os.environ.get("BAYOS_OAUTH_ALLOW_LOCAL")
+    os.environ.pop("BAYOS_OAUTH_ALLOW_LOCAL", None)
+    try:
+        allowed = [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://claude.com/api/mcp/auth_callback",
+            "https://claude.ai:443/api/mcp/auth_callback",
+            "http://localhost:3118/callback",
+            "http://127.0.0.1:9/callback",
+            "http://localhost/callback",
+        ]
+        for uri in allowed:
+            registered = client.post(
+                "/oauth/register",
+                json={"redirect_uris": [uri], "token_endpoint_auth_method": "none", "client_name": "Claude"},
+            )
+            assert registered.status_code == 201, uri + " " + registered.text
+        both = client.post(
+            "/oauth/register",
+            json={
+                "redirect_uris": [
+                    "https://claude.ai/api/mcp/auth_callback",
+                    "https://claude.com/api/mcp/auth_callback",
+                ],
+                "token_endpoint_auth_method": "none",
+                "client_name": "Claude",
+            },
+        )
+        assert both.status_code == 201, both.text
+        rejected = [
+            "https://claude.ai.evil.com/api/mcp/auth_callback",
+            "https://www.claude.ai/api/mcp/auth_callback",
+            "https://claude.ai/api/mcp/auth_callback/",
+            "https://claude.ai/api/mcp/auth_callback?next=1",
+            "https://claude.ai/api/mcp/auth_callback#frag",
+            "https://user:pass@claude.ai/api/mcp/auth_callback",
+            "https://claude.ai:8443/api/mcp/auth_callback",
+            "http://claude.ai/api/mcp/auth_callback",
+            "https://claude.com.evil/api/mcp/auth_callback",
+            "http://localhost:9/cb",
+            "http://127.0.0.1:9/callback/extra",
+            "https://localhost/callback",
+            "http://[::1]:9/callback",
+        ]
+        for uri in rejected:
+            denied = client.post(
+                "/oauth/register",
+                json={"redirect_uris": [uri], "token_endpoint_auth_method": "none", "client_name": "Claude"},
+            )
+            assert denied.status_code == 400, uri + " " + denied.text
+    finally:
+        if previous is None:
+            os.environ.pop("BAYOS_OAUTH_ALLOW_LOCAL", None)
+        else:
+            os.environ["BAYOS_OAUTH_ALLOW_LOCAL"] = previous
+
+    hosted = "https://claude.ai/api/mcp/auth_callback"
+    for name, agent in (
+        ("Claude", "claude-001"),
+        ("Claude Desktop", "claude-001"),
+        ("claude.ai", "claude-001"),
+        ("claudette", "chatgpt-001"),
+        ("MyClaude", "chatgpt-001"),
+        ("unit", "chatgpt-001"),
+    ):
+        item = _post_as(name, hosted)
+        assert item["agent"] == agent, name
+        assert item["client_name"] == name
+        assert item["untrusted"] is True
+    default = client.post(
+        "/oauth/register",
+        json={"redirect_uris": [hosted], "token_endpoint_auth_method": "none"},
+    )
+    assert default.status_code == 201
+    assert default.json()["client_name"] == "ChatGPT"
+    marked = client.get(
+        "/oauth/authorize",
+        params={
+            "response_type": "code",
+            "client_id": client.post(
+                "/oauth/register",
+                json={
+                    "redirect_uris": [hosted],
+                    "token_endpoint_auth_method": "none",
+                    "client_name": "<b>Claude</b>",
+                },
+            ).json()["client_id"],
+            "redirect_uri": hosted,
+            "state": "state-claude",
+            "code_challenge": _pkce("c" * 43)[1],
+            "code_challenge_method": "S256",
+            "scope": "bayos",
+            "resource": "http://testserver/mcp",
+        },
+    )
+    assert marked.status_code == 200
+    assert "&lt;b&gt;Claude&lt;/b&gt; is asking" in marked.text
+    assert "<b>Claude</b>" not in marked.text
+    assert "Redirect host: claude.ai." in marked.text
 
 
 def test_calendar_tool_hides_the_link():
@@ -329,12 +459,18 @@ def test_package_and_dockerfile():
     gpt = (root / "gpt/BayOS-Arm-GPT.md").read_text(encoding="utf-8")
     assert "Deprecated" in gpt
     assert "Dec 11, 2026" in gpt
+    claude = (root / "claude/SETUP.md").read_text(encoding="utf-8")
+    assert "Register automatically" in claude
+    assert "https://claude.ai/api/mcp/auth_callback" in claude
+    assert "https://claude.com/api/mcp/auth_callback" in claude
+    assert "claude-001" in claude
 
 
 if __name__ == "__main__":
     test_discovery_and_rejected_redirect()
     test_wrong_key_is_not_echoed()
     test_mcp_tools_mark_inbox_untrusted()
+    test_claude_redirects_and_agent()
     test_calendar_tool_hides_the_link()
     test_token_hashes_are_what_firestore_stores()
     test_package_and_dockerfile()
