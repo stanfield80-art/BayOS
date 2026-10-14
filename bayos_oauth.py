@@ -478,7 +478,7 @@ def consent_page(params: Dict[str, str], message: str, nonce: str) -> str:
 
 def render_consent(params: Dict[str, str], message: str):
     nonce = secrets.token_urlsafe(16)
-    return consent_page(params, message, nonce), consent_headers(nonce)
+    return consent_page(params, message, nonce), consent_headers(nonce, params.get("redirect_uri", ""))
 
 
 def parse_form(raw: bytes) -> Dict[str, str]:
@@ -489,11 +489,18 @@ def parse_form(raw: bytes) -> Dict[str, str]:
     return {key: values[-1] if values else "" for key, values in parsed.items()}
 
 
-def consent_headers(nonce: str) -> Dict[str, str]:
+def consent_headers(nonce: str, redirect_uri: str = "") -> Dict[str, str]:
+    # Chrome applies form-action to the post-submit redirect, so the
+    # client's redirect origin must be allowed or the button silently fails.
+    from urllib.parse import urlsplit
+    extra = ""
+    if redirect_uri and redirect_allowed(redirect_uri):
+        parts = urlsplit(redirect_uri)
+        extra = f" {parts.scheme}://{parts.netloc}"
     policy = (
         "default-src 'none'; "
         f"style-src 'nonce-{nonce}'; "
-        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        f"base-uri 'none'; form-action 'self'{extra}; frame-ancestors 'none'"
     )
     return {
         "Content-Security-Policy": policy,
