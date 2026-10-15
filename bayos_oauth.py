@@ -89,7 +89,8 @@ def _claude_code_loopback(parsed) -> bool:
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "http" or host not in {"localhost", "127.0.0.1"}:
         return False
-    if parsed.path != "/callback" or parsed.query:
+    # /callback is Claude Code; /oauth/callback is Gemini CLI.
+    if parsed.path not in {"/callback", "/oauth/callback"} or parsed.query:
         return False
     return True
 

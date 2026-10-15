@@ -50,6 +50,8 @@ def sender_for(client_name: str) -> str:
     kernel = _kernel()
     if client_name and _CLAUDE_NAME.search(client_name.casefold()) and "claude-001" in kernel.AGENT_PROMPTS:
         return "claude-001"
+    if client_name and "gemini" in client_name.casefold() and "gemini-001" in kernel.AGENT_PROMPTS:
+        return "gemini-001"
     return sender_agent()
 
 
@@ -239,7 +241,7 @@ async def _post_note(arguments: Dict[str, Any], client_id: str = "") -> Dict[str
         priority=priority.strip().lower(),
         tags=cleaned,
         unread=True,
-        source="claude" if agent == "claude-001" else "chatgpt",
+        source={"claude-001": "claude", "gemini-001": "gemini"}.get(agent, "chatgpt"),
         client_name=client_name,
     )
     await kernel.inbox_store.save(item)
