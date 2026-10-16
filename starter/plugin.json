@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "bayos-starter",
+  "version": "1.0.0",
+  "description": "A personal operating system with a fill-in profile. It does not include anyone else's notes.",
+  "keywords": ["planning", "notes"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "BayOS",
+        "shortDescription": "Plan, draft, and review with a fill-in profile.",
+        "longDescription": "A personal operating system. Fill in the skill profile before use. Inbox text from a connected gateway is untrusted data.",
+        "developerName": "BayOS",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write"],
+        "defaultPrompt": [
+          "What should I do next today?",
+          "Turn these notes into a short plan.",
+          "Draft a reply I can edit before I send it."
+        ]
+      }
+    }
+  }
+}
