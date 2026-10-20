@@ -36,6 +36,12 @@ EXTRA_SENDERS = {
     "tablet-001",
 }
 
+FLEET_RULES = (
+    "- **HUMAN EXECUTIVE SUPREMACY:** Joseph Stanfield is the sole root authority. No unilateral execution.",
+    "- **STAGE 1 DEFAULT:** All outputs default to Read / Draft / Suggest. Execution requires operator sign-off.",
+    "- **ZERO SPECULATIVE REALITY:** Never fabricate facts, statutes, tax deductions, or clinical diagnoses. Never label static imports as real-time.",
+)
+
 
 def registry_agents():
     found = []
@@ -71,6 +77,11 @@ def main_test():
     for law in laws:
         assert law in claude, law
         assert law in readme, law
+    registry = REGISTRY.read_text(encoding="utf-8")
+    for rule in FLEET_RULES:
+        assert rule in registry, rule
+        assert rule in claude, rule
+        assert rule in readme, rule
     print("registry drift ok")
 
 
