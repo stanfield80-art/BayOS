@@ -314,10 +314,73 @@ def test_calendar_route():
     check("failed calendar hides url", "private-token" not in str(failed) and failed["events"] == [], str(failed))
 
 
+def test_health_notes_follow_arm_clearance():
+    reset()
+    client = TestClient(main.app)
+    plain = client.post(
+        "/api/v1/inbox",
+        headers=KEY,
+        json={"agent": "tally-001", "title": "Four walls", "body": "Food and shelter first.", "tags": ["budget"]},
+    )
+    health = client.post(
+        "/api/v1/inbox",
+        headers=KEY,
+        json={"agent": "shortcut-001", "title": "Daily health 2026-10-18", "body": "Sleep hours: 7", "tags": ["Health", "sleep"]},
+    )
+    clinical = client.post(
+        "/api/v1/inbox",
+        headers=KEY,
+        json={"agent": "baymax-001", "title": "Study block", "body": "Read the chapter.", "tags": ["clinical"]},
+    )
+    check("posted notes", plain.status_code == 200 and health.status_code == 200 and clinical.status_code == 200, health.text[:300])
+    health_id = health.json()["id"]
+    stamps = {
+        "Four walls": "2026-10-18T15:00:00Z",
+        "Daily health 2026-10-18": "2026-10-18T16:00:00Z",
+        "Study block": "2026-10-18T17:00:00Z",
+    }
+    for item in main.inbox_store._memory:
+        if item.title in stamps:
+            item.received_at = stamps[item.title]
+
+    def titles(response):
+        check("list 200", response.status_code == 200, response.text[:300])
+        return [item["title"] for item in response.json()["items"]]
+
+    operator = titles(client.get("/api/v1/inbox?limit=20", headers=KEY))
+    check("operator sees health", operator == ["Study block", "Daily health 2026-10-18", "Four walls"], str(operator))
+    check("operator total", client.get("/api/v1/inbox?limit=20", headers=KEY).json()["total"] == 3)
+
+    hidden = titles(client.get("/api/v1/inbox?limit=1&viewer=chatgpt-001", headers=KEY))
+    check("chatgpt skips newer health notes", hidden == ["Four walls"], str(hidden))
+    for arm in ("claude-001", "gemini-001", "tablet-001", "dojo-001", "not-an-arm"):
+        seen = titles(client.get("/api/v1/inbox?limit=20&viewer=" + arm, headers=KEY))
+        check(arm + " hides health", seen == ["Four walls"], str(seen))
+    for arm in ("prof-x-001", "baymax-001", "shortcut-001", "joseph"):
+        seen = titles(client.get("/api/v1/inbox?limit=1&viewer=" + arm, headers=KEY))
+        check(arm + " first page is the newest health note", seen == ["Study block"], str(seen))
+        full = titles(client.get("/api/v1/inbox?limit=20&viewer=" + arm, headers=KEY))
+        check(arm + " sees all three", len(full) == 3, str(full))
+
+    check("prof-x sensitivity", main.ARM_SENSITIVITY["prof-x-001"] == frozenset({"health"}))
+    check("one gemini prompt", sum(1 for key in main.AGENT_PROMPTS if key == "gemini-001") == 1)
+
+    stored = None
+    for item in main.inbox_store._memory:
+        if item.id == health_id:
+            stored = item
+    check("found stored health", stored is not None)
+    stored.archived = True
+    after = titles(client.get("/api/v1/inbox?limit=20", headers=KEY))
+    check("archived health is hidden", "Daily health 2026-10-18" not in after and "Four walls" in after, str(after))
+    stored.archived = False
+
+
 def main_test():
     test_health_and_docs()
     test_gpt_schema()
     test_agents_and_health_daily()
+    test_health_notes_follow_arm_clearance()
     test_tablet()
     test_calendar_urls()
     test_calendar_parse()
