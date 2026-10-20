@@ -162,7 +162,12 @@ def _error(text: str) -> Dict[str, Any]:
     return _result(text, {"untrusted": True}, is_error=True)
 
 
-async def _list_inbox(arguments: Dict[str, Any]) -> Dict[str, Any]:
+def _viewer(client_id: str) -> str:
+    """The arm is the OAuth client, not a field the tool arguments can set."""
+    return sender_for(registered_client_name(client_id))
+
+
+async def _list_inbox(arguments: Dict[str, Any], client_id: str = "") -> Dict[str, Any]:
     kernel = _kernel()
     unread = arguments.get("unread")
     if unread is not None and not isinstance(unread, bool):
@@ -189,6 +194,7 @@ async def _list_inbox(arguments: Dict[str, Any]) -> Dict[str, Any]:
         unread,
         offset=0,
         descending=True,
+        viewer=_viewer(client_id),
     )
     items = [_public_item(item) for item in page.items]
     lines = [f"count: {len(items)}"]
@@ -258,11 +264,15 @@ async def _post_note(arguments: Dict[str, Any], client_id: str = "") -> Dict[str
     return _result(text, {"untrusted": True, "item": public})
 
 
-async def _mark_read(arguments: Dict[str, Any]) -> Dict[str, Any]:
+async def _mark_read(arguments: Dict[str, Any], client_id: str = "") -> Dict[str, Any]:
     kernel = _kernel()
     item_id = arguments.get("id")
     if not isinstance(item_id, str) or not kernel._INBOX_ID_RE.match(item_id):
         return _error("id must be the 32 character inbox id.")
+    existing = await kernel.inbox_store.get(item_id)
+    viewer = _viewer(client_id)
+    if existing is None or existing.archived or not kernel.viewer_can_see(viewer, existing):
+        return _error("That inbox note was not found.")
     item = await kernel.inbox_store.mark_read(item_id)
     if item is None:
         return _error("That inbox note was not found.")
@@ -298,11 +308,11 @@ async def call_tool(name: str, arguments: Dict[str, Any], client_id: str = "") -
     if not isinstance(arguments, dict):
         return _error("Tool arguments must be an object.")
     if name == "list_inbox":
-        return await _list_inbox(arguments)
+        return await _list_inbox(arguments, client_id)
     if name == "post_note":
         return await _post_note(arguments, client_id)
     if name == "mark_read":
-        return await _mark_read(arguments)
+        return await _mark_read(arguments, client_id)
     if name == "get_calendar":
         return await _calendar(arguments)
     return _error("That tool is not available.")

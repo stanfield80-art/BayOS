@@ -442,6 +442,75 @@ def test_token_hashes_are_what_firestore_stores():
             os.environ["GOOGLE_CLOUD_PROJECT"] = previous_project
 
 
+def test_mcp_hides_health_from_uncleared_arms():
+    main.rate_limiter.hits.clear()
+    main.inbox_store.reset_for_tests()
+    posted = client.post(
+        "/api/v1/inbox",
+        headers={"X-BayOS-Key": os.environ["BAYOS_AUTH_KEY"]},
+        json={
+            "agent": "shortcut-001",
+            "title": "Daily health 2026-10-18",
+            "body": "Steps: 1000",
+            "tags": ["health"],
+        },
+    )
+    assert posted.status_code == 200, posted.text
+    health_id = posted.json()["id"]
+    plain = client.post(
+        "/api/v1/inbox",
+        headers={"X-BayOS-Key": os.environ["BAYOS_AUTH_KEY"]},
+        json={"agent": "tally-001", "title": "Four walls", "body": "Food first.", "tags": ["budget"]},
+    )
+    assert plain.status_code == 200, plain.text
+    tokens, _client_id = _token(client_name="unit")
+    headers = {"Authorization": "Bearer " + tokens["access_token"]}
+    listed = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "list_inbox", "arguments": {"limit": 20}}},
+        headers=headers,
+    )
+    assert listed.status_code == 200, listed.text
+    items = listed.json()["result"]["structuredContent"]["items"]
+    assert [item["title"] for item in items] == ["Four walls"]
+    assert "Steps: 1000" not in listed.text
+    denied = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "mark_read", "arguments": {"id": health_id, "viewer": "prof-x-001"}},
+        },
+        headers=headers,
+    )
+    assert denied.status_code == 200, denied.text
+    assert denied.json()["result"]["isError"] is True
+    assert "not found" in denied.json()["result"]["content"][0]["text"]
+    operator = client.get("/api/v1/inbox?limit=20", headers={"X-BayOS-Key": os.environ["BAYOS_AUTH_KEY"]})
+    health = [item for item in operator.json()["items"] if item["id"] == health_id][0]
+    assert health["unread"] is True
+
+    previous = os.environ.get("BAYOS_MCP_AGENT")
+    os.environ["BAYOS_MCP_AGENT"] = "prof-x-001"
+    try:
+        cleared_tokens, _cleared_id = _token(client_name="pole-unit")
+        cleared = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "list_inbox", "arguments": {"limit": 20}}},
+            headers={"Authorization": "Bearer " + cleared_tokens["access_token"]},
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("BAYOS_MCP_AGENT", None)
+        else:
+            os.environ["BAYOS_MCP_AGENT"] = previous
+    assert cleared.status_code == 200, cleared.text
+    cleared_titles = [item["title"] for item in cleared.json()["result"]["structuredContent"]["items"]]
+    assert "Daily health 2026-10-18" in cleared_titles
+    assert "Four walls" in cleared_titles
+
+
 def test_package_and_dockerfile():
     root = Path(__file__).resolve().parents[1]
     dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
@@ -473,6 +542,7 @@ if __name__ == "__main__":
     test_claude_redirects_and_agent()
     test_calendar_tool_hides_the_link()
     test_token_hashes_are_what_firestore_stores()
+    test_mcp_hides_health_from_uncleared_arms()
     test_package_and_dockerfile()
     health = client.get("/health")
     assert sorted(health.json()) == ["inbox_storage", "status", "version"]
