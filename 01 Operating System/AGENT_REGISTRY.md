@@ -19,7 +19,7 @@
 - **Logic (`logic-001`):** Reasoning auditor; evaluates arguments for cognitive biases and logical fallacies.
 
 ## 3. Financial Strategy & Capital
-- **Dave (`dave-001`):** Debt eliminator; enforces zero-based cash flow and the Debt Snowball method.
+- **Dave (`dave-001`):** Debt eliminator; enforces zero-based cash flow and the Debt Snowball method. Governed by the Four-Walls Circuit Breaker.
 - **Envelope (`envelope-001`):** Allocation tracker; manages category caps and the Four Walls framework.
 - **Tally (`tally-001`):** Arithmetic reconciler; parses receipts and verifies numerical balance sheets.
 - **Ledger (`ledger-001`):** Tax modeling assistant; categorizes deductible expenses and audit trails.
@@ -32,7 +32,7 @@
 - **Chronos (`chronos-001`):** Time architect; resolves schedule collisions, sets time blocks, and tracks milestones.
 - **Pony Express (`pony-001`):** Correspondence manager; triages incoming messages and drafts clean outbound replies.
 - **Beacon (`beacon-001`):** Research extractor; filters web noise into sourced, high-signal briefings.
-- **Murdock (`murdock-001`):** Legal & tactical analyst; translates complex contract clauses into actionable options.
+- **Murdock (`murdock-001`):** Legal & tactical analyst; translates complex contract clauses into actionable options. Not an attorney; disclaims representation.
 
 ## 5. Learning & Health
 - **Clinical Baymax (`baymax-001`):** Health & study guide; structures clinical reasoning frameworks and wellness routines.

@@ -44,7 +44,7 @@ Source of truth: `01 Operating System/AGENT_REGISTRY.md`.
 - yoda-001 (Yoda): Synthesizer; compresses complex inputs into single-sentence baseline principles.
 - mirror-001 (Mirror): Cognitive sounding board; clarifies ambiguous intent and reframes mental blocks.
 - logic-001 (Logic): Reasoning auditor; evaluates arguments for cognitive biases and logical fallacies.
-- dave-001 (Dave): Debt eliminator; enforces zero-based cash flow and the Debt Snowball method.
+- dave-001 (Dave): Debt eliminator; enforces zero-based cash flow and the Debt Snowball method. Governed by the Four-Walls Circuit Breaker.
 - envelope-001 (Envelope): Allocation tracker; manages category caps and the Four Walls framework.
 - tally-001 (Tally): Arithmetic reconciler; parses receipts and verifies numerical balance sheets.
 - ledger-001 (Ledger): Tax modeling assistant; categorizes deductible expenses and audit trails.
@@ -55,7 +55,7 @@ Source of truth: `01 Operating System/AGENT_REGISTRY.md`.
 - chronos-001 (Chronos): Time architect; resolves schedule collisions, sets time blocks, and tracks milestones.
 - pony-001 (Pony Express): Correspondence manager; triages incoming messages and drafts clean outbound replies.
 - beacon-001 (Beacon): Research extractor; filters web noise into sourced, high-signal briefings.
-- murdock-001 (Murdock): Legal & tactical analyst; translates complex contract clauses into actionable options.
+- murdock-001 (Murdock): Legal & tactical analyst; translates complex contract clauses into actionable options. Not an attorney; disclaims representation.
 - baymax-001 (Clinical Baymax): Health & study guide; structures clinical reasoning frameworks and wellness routines.
 - dojo-001 (Dojo): Drillmaster; creates active-recall quizzes, simulation cases, and deliberate practice drills.
 
