@@ -1,0 +1,27 @@
+# Source upload for `gcloud run deploy --source`.
+# Keeps secrets and the vault off the Cloud Build upload.
+# The image build also applies .dockerignore.
+
+#!include:.gitignore
+
+.git/
+**/.env
+**/.env.*
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
+*.ps1
+*.md
+logo.svg
+00 Inbox/
+01 Operating System/
+02 Identity/
+03 Current State/
+04 Projects/
+05 Clinical/
+06 Research/
+07 Resources/
+08 Memory/
+09 Templates/
+10 Baymax/

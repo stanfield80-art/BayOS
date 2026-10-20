@@ -147,9 +147,14 @@ activemq-data/
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments and local secrets. Cloud Run reads keys from Secret Manager.
 .env
+.env.*
 .envrc
+*.pem
+*.key
+*credentials*.json
+*service-account*.json
 .venv
 env/
 venv/
@@ -216,3 +221,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local BayOS vault and the DPAPI gateway key
+BayOS-Vault/
+.bayos/
